@@ -23,6 +23,10 @@
 #include "hw/block/block.h"
 
 #include "block/nvme.h"
+#define PHISON_MODEL_MMIO_OP_READ (0)
+#define PHISON_MODEL_MMIO_OP_WRITE (1)
+#define PHISON_MODEL_MMIO_RESULT_FAIL (0)
+#define PHISON_MODEL_MMIO_RESULT_SUCCESS (1)
 
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
@@ -44,6 +48,19 @@ typedef struct NvmeNamespace NvmeNamespace;
 
 #define TYPE_NVME_BUS "nvme-bus"
 OBJECT_DECLARE_SIMPLE_TYPE(NvmeBus, NVME_BUS)
+
+typedef struct QEMU_PACKED PhisonMMIoOpInfo{
+    uint32_t op;
+    uint32_t size;
+    uint64_t offset;
+    uint64_t data;
+} PhisonMMIoOpInfo;
+
+typedef struct QEMU_PACKED PhisonMMIoOpResult{
+    uint64_t result;
+    uint64_t data;
+} PhisonMMIoOpResult;
+
 
 typedef struct NvmeBus {
     BusState parent_bus;
@@ -544,6 +561,8 @@ typedef struct NvmeParams {
     uint16_t sriov_vi_flexible;
     uint32_t  sriov_max_vq_per_vf;
     uint32_t  sriov_max_vi_per_vf;
+    char *phison_model_ip;
+    uint16_t phison_model_port;
     bool     msix_exclusive_bar;
 
     struct {
@@ -634,6 +653,8 @@ typedef struct NvmeCtrl {
         uint16_t    vqrfap;
         uint16_t    virfap;
     } next_pri_ctrl_cap;    /* These override pri_ctrl_cap after reset */
+    // int phison_model_server_socket;
+    int phison_model_client_socket;
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
 } NvmeCtrl;

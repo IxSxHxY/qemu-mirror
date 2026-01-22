@@ -89,6 +89,7 @@ file_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
     ram_flags |= backend->guest_memfd ? RAM_GUEST_MEMFD : 0;
     ram_flags |= fb->is_pmem ? RAM_PMEM : 0;
     ram_flags |= RAM_NAMED_FILE;
+    printf("name: %s, size:%llu, align:%llu, ram_flags:%u, mem_path:%s, offset:%llu, readonly:%u\n", name, (unsigned long long)backend->size, (unsigned long long)fb->align, ram_flags, fb->mem_path, (unsigned long long)fb->offset, fb->readonly);
     return memory_region_init_ram_from_file(&backend->mr, OBJECT(backend), name,
                                             backend->size, fb->align, ram_flags,
                                             fb->mem_path, fb->offset, errp);

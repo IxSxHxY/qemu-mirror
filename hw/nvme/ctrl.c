@@ -212,6 +212,17 @@
 #include "nvme.h"
 #include "dif.h"
 #include "trace.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+
+#include <stdio.h>
 
 #define NVME_MAX_IOQPAIRS 0xffff
 #define NVME_DB_SIZE  4
@@ -227,12 +238,23 @@
 #define NVME_VF_OFFSET 0x1
 #define NVME_VF_STRIDE 1
 
+#define PHISON_MODEL_MODE_ENABLED(n)  ((n->params.phison_model_port > 0) && (n->params.phison_model_ip))
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
         qemu_log_mask(LOG_GUEST_ERROR, #trace \
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
+// static void write_debug_line(const char *line) {
+//     int fd = open("/root/nvme_debug.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+//     if (fd < 0) {
+//         dprintf(STDERR_FILENO, "nvme_exit open failed: %s\n", strerror(errno));
+//         return;
+//     }
+//     dprintf(fd, "%s\n", line);   // unbuffered write
+//     fsync(fd);                   // force to disk before process ends
+//     close(fd);
+// }
 
 static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_ARBITRATION]              = true,
@@ -7933,6 +7955,36 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
     }
 }
 
+static uint64_t send_mmio_op_to_phison_model(NvmeCtrl *n, hwaddr addr, unsigned size, unsigned op, uint64_t data){
+    PhisonMMIoOpInfo info = {0};
+    PhisonMMIoOpResult result = {0};
+    info.op = op;
+    info.size = size;
+    info.offset = addr;
+    info.data = data;
+    int bytes_sent = send(n->phison_model_client_socket, &info, sizeof(PhisonMMIoOpInfo), 0);
+    if (bytes_sent < 0) {
+        printf("nvme phison model socket send fail\n");
+        return 0;
+    }
+    
+    int bytes_received = recv(n->phison_model_client_socket, &result, sizeof(PhisonMMIoOpResult), 0);
+
+    if (bytes_received == 0) {
+        // The client has closed the connection
+        printf("nvme phison model socket model closed connection\n");
+        close(n->phison_model_client_socket);
+        n->phison_model_client_socket = -1;
+        return 0;
+    } else if (bytes_received < 0) {
+        printf("nvme phison model socket recv fail\n");
+        close(n->phison_model_client_socket);
+        n->phison_model_client_socket = -1;
+        return 0;
+    } 
+    return result.data;
+}
+
 static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
@@ -7978,6 +8030,8 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
     return ldn_le_p(ptr + addr, size);
 }
+
+
 
 static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
 {
@@ -8145,9 +8199,83 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
     }
 }
 
+static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned size)
+{
+    NvmeCtrl *n = (NvmeCtrl *)opaque;
+    
+    // trace_pci_nvme_mmio_read(addr, size);
+
+    // if (unlikely(addr & (sizeof(uint32_t) - 1))) {
+    //     NVME_GUEST_ERR(pci_nvme_ub_mmiord_misaligned32,
+    //                    "MMIO read not 32-bit aligned,"
+    //                    " offset=0x%"PRIx64"", addr);
+    //     /* should RAZ, fall through for now */
+    // } else if (unlikely(size < sizeof(uint32_t))) {
+    //     NVME_GUEST_ERR(pci_nvme_ub_mmiord_toosmall,
+    //                    "MMIO read smaller than 32-bits,"
+    //                    " offset=0x%"PRIx64"", addr);
+    //     /* should RAZ, fall through for now */
+    // }
+
+    // if (addr > sizeof(n->bar) - size) {
+    //     NVME_GUEST_ERR(pci_nvme_ub_mmiord_invalid_ofs,
+    //                    "MMIO read beyond last register,"
+    //                    " offset=0x%"PRIx64", returning 0", addr);
+
+    //     return 0;
+    // }
+
+    // if (pci_is_vf(PCI_DEVICE(n)) && !nvme_sctrl(n)->scs &&
+    //     addr != NVME_REG_CSTS) {
+    //     trace_pci_nvme_err_ignored_mmio_vf_offline(addr, size);
+    //     return 0;
+    // }
+
+    // /*
+    //  * When PMRWBM bit 1 is set then read from
+    //  * from PMRSTS should ensure prior writes
+    //  * made it to persistent media
+    //  */
+    // if (addr == NVME_REG_PMRSTS &&
+    //     (NVME_PMRCAP_PMRWBM(ldl_le_p(&n->bar.pmrcap)) & 0x02)) {
+    //     memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
+    // }
+    uint64_t ret_val = nvme_mmio_read(opaque, addr, size);
+    send_mmio_op_to_phison_model(n, addr, size, PHISON_MODEL_MMIO_OP_READ, 0);
+    return ret_val;
+}
+
+static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t data,
+                            unsigned size)
+{
+    NvmeCtrl *n = (NvmeCtrl *)opaque;
+
+    // trace_pci_nvme_mmio_write(addr, data, size);
+
+    // if (pci_is_vf(PCI_DEVICE(n)) && !nvme_sctrl(n)->scs &&
+    //     addr != NVME_REG_CSTS) {
+    //     trace_pci_nvme_err_ignored_mmio_vf_offline(addr, size);
+    //     return;
+    // }
+
+    nvme_mmio_write(opaque, addr, data, size);
+    send_mmio_op_to_phison_model(n , addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
+
+}
+
 static const MemoryRegionOps nvme_mmio_ops = {
     .read = nvme_mmio_read,
     .write = nvme_mmio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 2,
+        .max_access_size = 8,
+    },
+};
+
+static const MemoryRegionOps nvme_mmio_ops_phison = {
+    .read = nvme_mmio_read_phison_model,
+    .write = nvme_mmio_write_phison_model,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = {
         .min_access_size = 2,
@@ -8595,8 +8723,15 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
         }
 
         memory_region_init(&n->bar0, OBJECT(n), "nvme-bar0", bar_size);
-        memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
-                              msix_table_offset);
+        // memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+        //                       msix_table_offset);
+        if(PHISON_MODEL_MODE_ENABLED(n)){
+            memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops_phison, n, "nvme",
+                                msix_table_offset);
+        }else{
+            memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+                                msix_table_offset);
+        }
         memory_region_add_subregion(&n->bar0, 0, &n->iomem);
 
         if (pci_is_vf(pci_dev)) {
@@ -8876,6 +9011,40 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 
         nvme_attach_ns(n, ns);
     }
+
+
+    // n->phison_model_server_socket = -1;
+    n->phison_model_client_socket = -1;
+    printf("going into socket creation block\n");
+    fflush(stdout);
+    if (PHISON_MODEL_MODE_ENABLED(n)){
+        struct sockaddr_in server_addr = {0};
+        n->phison_model_client_socket = socket(AF_INET, SOCK_STREAM, 0);
+        //printf("client sock created\n");
+        //fflush(stdout);
+        if (n->phison_model_client_socket < 0) {
+            error_setg(errp, "nvme phison model socket construct fail.");
+            return;
+        }
+
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(n->params.phison_model_port);
+        
+        if (inet_pton(AF_INET, n->params.phison_model_ip, &server_addr.sin_addr) <= 0) {
+            error_setg(errp, "nvme phison model socket inet pton fail.");
+            return;
+        }
+        //printf("inet_pton done\n");
+        //fflush(stdout);
+
+        if (connect(n->phison_model_client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            error_setg(errp, "nvme phison model socket connect fail.");
+            return;
+        }
+    }
+    printf("nvme realize done\n");
+    fflush(stdout);
+
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
@@ -8925,6 +9094,15 @@ static void nvme_exit(PCIDevice *pci_dev)
     }
 
     memory_region_del_subregion(&n->bar0, &n->iomem);
+
+
+    // if(n->phison_model_server_socket>=0){
+    //     close(n->phison_model_server_socket);
+    // }
+    
+    if(n->phison_model_client_socket>=0){
+        close(n->phison_model_client_socket);
+    }
 }
 
 static Property nvme_props[] = {
@@ -8965,6 +9143,10 @@ static Property nvme_props[] = {
     DEFINE_PROP_BOOL("atomic.dn", NvmeCtrl, params.atomic_dn, 0),
     DEFINE_PROP_UINT16("atomic.awun", NvmeCtrl, params.atomic_awun, 0),
     DEFINE_PROP_UINT16("atomic.awupf", NvmeCtrl, params.atomic_awupf, 0),
+
+
+    DEFINE_PROP_STRING("phison_model_ip", NvmeCtrl, params.phison_model_ip),
+    DEFINE_PROP_UINT16("phison_model_port", NvmeCtrl, params.phison_model_port, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

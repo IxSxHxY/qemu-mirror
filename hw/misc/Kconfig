@@ -206,6 +206,11 @@ config AXP2XX_PMU
     bool
     depends on I2C
 
+config HOSTMEM_GW
+    bool
+    depends on PCI
+    default y
+
 config DJMEMC
     bool
 
