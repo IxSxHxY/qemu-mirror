@@ -7409,6 +7409,49 @@ static NvmeAtomic *nvme_get_atomic(NvmeCtrl *n, NvmeCmd *cmd)
     return NULL;
 }
 
+typedef struct QEMU_PACKED PhisonSQEInfo {
+    uint64_t sqid;
+    uint64_t opcode;
+    uint64_t cid;
+    hwaddr offset;
+    NvmeCmd sqe;
+} PhisonSQEInfo;
+
+typedef struct QEMU_PACKED PhisonSQEResult{
+    uint64_t result;
+    uint64_t data;
+} PhisonSQEResult;
+
+static uint64_t send_sqe_to_phison_model(NvmeCtrl *n, uint64_t sqid, uint64_t opcode, hwaddr addr, NvmeCmd sqe){
+    PhisonSQEInfo info = {0};
+    PhisonSQEResult result = {0};
+    info.sqid = sqid;
+    info.opcode = opcode;
+    info.offset = addr;
+    info.sqe = sqe;
+    int bytes_sent = send(n->phison_model_client_socket, &info, sizeof(PhisonSQEInfo), 0);
+    if (bytes_sent < 0) {
+        printf("nvme phison model socket send fail\n");
+        return 0;
+    }
+    
+    int bytes_received = recv(n->phison_model_client_socket, &result, sizeof(PhisonSQEResult), 0);
+
+    if (bytes_received == 0) {
+        // The client has closed the connection
+        printf("nvme phison model socket model closed connection\n");
+        close(n->phison_model_client_socket);
+        n->phison_model_client_socket = -1;
+        return 0;
+    } else if (bytes_received < 0) {
+        printf("nvme phison model socket recv fail\n");
+        close(n->phison_model_client_socket);
+        n->phison_model_client_socket = -1;
+        return 0;
+    } 
+    return result.data;
+}
+
 static void nvme_process_sq(void *opaque)
 {
     NvmeSQueue *sq = opaque;
@@ -7463,11 +7506,11 @@ static void nvme_process_sq(void *opaque)
         nvme_req_clear(req);
         req->cqe.cid = cmd.cid;
         memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
-
+        send_sqe_to_phison_model(n, sq->sqid, req->cmd.opcode, addr, req->cmd);
         if (sq->sqid && atomic) {
             req->atomic_write = cmd_is_atomic;
         }
-
+        
         status = sq->sqid ? nvme_io_cmd(n, req) :
             nvme_admin_cmd(n, req);
         if (status != NVME_NO_COMPLETE) {
