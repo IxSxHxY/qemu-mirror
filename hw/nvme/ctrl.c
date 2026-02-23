@@ -239,6 +239,7 @@
 #define NVME_VF_STRIDE 1
 
 #define PHISON_MODEL_MODE_ENABLED(n)  ((n->params.phison_model_port > 0) && (n->params.phison_model_ip))
+#define PHISON_MODEL_PCI_MODE_ENABLED(n)  ((n->params.phison_model_pci_port > 0) && (n->params.phison_model_ip))
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
@@ -339,6 +340,12 @@ static const uint32_t nvme_cse_iocs_zoned[256] = {
 static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
+
+static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
+                                  uint32_t val, int len);
+static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t address,
+                                int len);
+
 
 static uint16_t nvme_sqid(NvmeRequest *req)
 {
@@ -8028,6 +8035,37 @@ static uint64_t send_mmio_op_to_phison_model(NvmeCtrl *n, hwaddr addr, unsigned 
     return result.data;
 }
 
+static uint64_t send_mmio_op_to_phison_model_pci(PCIDevice *dev, hwaddr addr, unsigned size, unsigned op, uint64_t data){
+    NvmeCtrl *n = NVME(dev);
+    PhisonMMIoOpInfo info = {0};
+    PhisonMMIoOpResult result = {0};
+    info.op = op;
+    info.size = size;
+    info.offset = addr;
+    info.data = data;
+    int bytes_sent = send(n->phison_model_pci_client_socket, &info, sizeof(PhisonMMIoOpInfo), 0);
+    if (bytes_sent < 0) {
+        printf("nvme phison model pci socket send fail\n");
+        return 0;
+    }
+    
+    int bytes_received = recv(n->phison_model_pci_client_socket, &result, sizeof(PhisonMMIoOpResult), 0);
+
+    if (bytes_received == 0) {
+        // The client has closed the connection
+        printf("nvme phison model pci socket model closed connection\n");
+        close(n->phison_model_pci_client_socket);
+        n->phison_model_pci_client_socket = -1;
+        return 0;
+    } else if (bytes_received < 0) {
+        printf("nvme phison model pci socket recv fail\n");
+        close(n->phison_model_pci_client_socket);
+        n->phison_model_pci_client_socket = -1;
+        return 0;
+    } 
+    return result.data;
+}
+
 static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
@@ -9085,6 +9123,35 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
     }
+    printf("going into pci socket creation block\n");
+    n->phison_model_pci_client_socket = -1;
+    if (PHISON_MODEL_PCI_MODE_ENABLED(n)){
+        struct sockaddr_in server_addr = {0};
+        n->phison_model_pci_client_socket = socket(AF_INET, SOCK_STREAM, 0);
+        //printf("client sock created\n");
+        //fflush(stdout);
+        if (n->phison_model_pci_client_socket < 0) {
+            error_setg(errp, "nvme phison model pci socket construct fail.");
+            return;
+        }
+
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(n->params.phison_model_pci_port);
+        
+        if (inet_pton(AF_INET, n->params.phison_model_ip, &server_addr.sin_addr) <= 0) {
+            error_setg(errp, "nvme phison model pci socket inet pton fail.");
+            return;
+        }
+        //printf("inet_pton done\n");
+        //fflush(stdout);
+
+        if (connect(n->phison_model_pci_client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            error_setg(errp, "nvme phison model pci socket connect fail.");
+            return;
+        }
+        pci_dev->config_read = nvme_pci_read_config_phison_model;
+        pci_dev->config_write = nvme_pci_write_config_phison_model;
+    }
     printf("nvme realize done\n");
     fflush(stdout);
 
@@ -9146,6 +9213,10 @@ static void nvme_exit(PCIDevice *pci_dev)
     if(n->phison_model_client_socket>=0){
         close(n->phison_model_client_socket);
     }
+
+    if(n->phison_model_pci_client_socket>=0){
+        close(n->phison_model_pci_client_socket);
+    }
 }
 
 static Property nvme_props[] = {
@@ -9190,6 +9261,7 @@ static Property nvme_props[] = {
 
     DEFINE_PROP_STRING("phison_model_ip", NvmeCtrl, params.phison_model_ip),
     DEFINE_PROP_UINT16("phison_model_port", NvmeCtrl, params.phison_model_port, 0),
+    DEFINE_PROP_UINT16("phison_model_pci_port", NvmeCtrl, params.phison_model_pci_port, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -9269,6 +9341,13 @@ static void nvme_pci_write_config(PCIDevice *dev, uint32_t address,
     nvme_sriov_post_write_config(dev, old_num_vfs);
 }
 
+static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
+                                  uint32_t val, int len)
+{
+    nvme_pci_write_config(dev, address, val, len);
+    send_mmio_op_to_phison_model_pci(dev, address, len, PHISON_MODEL_PCI_CFG_OP_WRITE, val);
+}
+
 static uint32_t nvme_pci_read_config(PCIDevice *dev, uint32_t address, int len)
 {
     uint32_t val;
@@ -9278,6 +9357,13 @@ static uint32_t nvme_pci_read_config(PCIDevice *dev, uint32_t address, int len)
         }
     }
     return pci_default_read_config(dev, address, len);
+}
+
+static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t address, int len)
+{
+    uint32_t ret_val = nvme_pci_read_config(dev, address, len);
+    send_mmio_op_to_phison_model_pci(dev, address, len, PHISON_MODEL_PCI_CFG_OP_READ, 0);
+    return ret_val;
 }
 
 static const VMStateDescription nvme_vmstate = {

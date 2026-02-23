@@ -25,6 +25,8 @@
 #include "block/nvme.h"
 #define PHISON_MODEL_MMIO_OP_READ (0)
 #define PHISON_MODEL_MMIO_OP_WRITE (1)
+#define PHISON_MODEL_PCI_CFG_OP_READ (0)
+#define PHISON_MODEL_PCI_CFG_OP_WRITE (1)
 #define PHISON_MODEL_MMIO_RESULT_FAIL (0)
 #define PHISON_MODEL_MMIO_RESULT_SUCCESS (1)
 
@@ -563,6 +565,7 @@ typedef struct NvmeParams {
     uint32_t  sriov_max_vi_per_vf;
     char *phison_model_ip;
     uint16_t phison_model_port;
+    uint16_t phison_model_pci_port;
     bool     msix_exclusive_bar;
 
     struct {
@@ -655,6 +658,7 @@ typedef struct NvmeCtrl {
     } next_pri_ctrl_cap;    /* These override pri_ctrl_cap after reset */
     // int phison_model_server_socket;
     int phison_model_client_socket;
+    int phison_model_pci_client_socket;
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
 } NvmeCtrl;
