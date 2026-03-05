@@ -9096,9 +9096,9 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 
     // n->phison_model_server_socket = -1;
     n->phison_model_client_socket = -1;
-    printf("going into socket creation block\n");
-    fflush(stdout);
     if (PHISON_MODEL_MODE_ENABLED(n)){
+        printf("[NVME] going into socket creation block\n");
+        fflush(stdout);
         struct sockaddr_in server_addr = {0};
         n->phison_model_client_socket = socket(AF_INET, SOCK_STREAM, 0);
         //printf("client sock created\n");
@@ -9123,9 +9123,10 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
     }
-    printf("going into pci socket creation block\n");
+    
     n->phison_model_pci_client_socket = -1;
     if (PHISON_MODEL_PCI_MODE_ENABLED(n)){
+        printf("[PCIE] going into pci socket creation block\n");
         struct sockaddr_in server_addr = {0};
         n->phison_model_pci_client_socket = socket(AF_INET, SOCK_STREAM, 0);
         //printf("client sock created\n");
