@@ -2821,15 +2821,15 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     SCSIRequest *req;
     const SCSIReqOps *ops;
     uint8_t command;
-    printf("scsi_new_request CDB Received: ");
-    for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
-    {
-        printf("0x%02X ", buf[i]);
-    }
-    printf("\n");
+    // printf("scsi_new_request CDB Received: ");
+    // for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+    // {
+    //     printf("0x%02X ", buf[i]);
+    // }
+    // printf("\n");
     if (buf[0] == 0x06 && buf[1] == 0xF0) 
     {
-        printf("Vendor md received, forward to model code.\n");
+        // printf("Vendor md received, forward to model code.\n");
         if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
         {
             send_cdb_to_phison_model_tester(s, buf);

@@ -1521,6 +1521,8 @@ static void nvme_update_cq_head(NvmeCQueue *cq)
     trace_pci_nvme_update_cq_head(cq->cqid, cq->head);
 }
 
+volatile int a = 0;
+
 static void nvme_post_cqes(void *opaque)
 {
     NvmeCQueue *cq = opaque;
@@ -1547,8 +1549,18 @@ static void nvme_post_cqes(void *opaque)
         req->cqe.sq_id = cpu_to_le16(sq->sqid);
         req->cqe.sq_head = cpu_to_le16(sq->head);
         addr = cq->dma_addr + (cq->tail << NVME_CQES);
-        ret = pci_dma_write(PCI_DEVICE(n), addr, (void *)&req->cqe,
-                            sizeof(req->cqe));
+        printf("Should write at addr=0x%lX\n", addr);
+        if (sq->sqid == 0 && req->cmd.opcode == 0x06 && (req->cmd.cdw10 & 0x1) == 1)
+        {
+            printf("Hi\n");
+            ret = 0;
+        }
+        else 
+        {
+            ret = pci_dma_write(PCI_DEVICE(n), addr, (void *)&req->cqe,
+                    sizeof(req->cqe));
+        }
+        
         if (ret) {
             trace_pci_nvme_err_addr_write(addr);
             trace_pci_nvme_err_cfs();
@@ -7297,7 +7309,7 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
     case NVME_ADM_CMD_CREATE_CQ:
         return nvme_create_cq(n, req);
     case NVME_ADM_CMD_IDENTIFY:
-        return nvme_identify(n, req);
+        return 0 && nvme_identify(n, req);
     case NVME_ADM_CMD_ABORT:
         return nvme_abort(n, req);
     case NVME_ADM_CMD_SET_FEATURES:
