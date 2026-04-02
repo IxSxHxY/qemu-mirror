@@ -1550,7 +1550,7 @@ static void nvme_post_cqes(void *opaque)
         req->cqe.sq_head = cpu_to_le16(sq->head);
         addr = cq->dma_addr + (cq->tail << NVME_CQES);
         printf("Should write at addr=0x%lX\n", addr);
-        if (sq->sqid == 0 && req->cmd.opcode == 0x06 && (req->cmd.cdw10 & 0x1) == 1)
+        if (true)//)sq->sqid == 0 && req->cmd.opcode == 0x06 && (req->cmd.cdw10 & 0x1) == 1)
         {
             printf("Hi\n");
             ret = 0;
@@ -6014,8 +6014,9 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req)
                             c->csi);
 
     switch (c->cns) {
-    case NVME_ID_CNS_NS:
-        return nvme_identify_ns(n, req, true);
+    case NVME_ID_CNS_NS: // 0
+        // return nvme_identify_ns(n, req, true);
+        return 0 && nvme_identify_ns(n, req, true);
     case NVME_ID_CNS_NS_PRESENT:
         return nvme_identify_ns(n, req, false);
     case NVME_ID_CNS_NS_ATTACHED_CTRL_LIST:
@@ -6026,20 +6027,24 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req)
         return nvme_identify_pri_ctrl_cap(n, req);
     case NVME_ID_CNS_SECONDARY_CTRL_LIST:
         return nvme_identify_sec_ctrl_list(n, req);
-    case NVME_ID_CNS_CS_NS:
-        return nvme_identify_ns_csi(n, req, true);
+    case NVME_ID_CNS_CS_NS: // 5
+        // return nvme_identify_ns_csi(n, req, true);
+        return 0 &&nvme_identify_ns_csi(n, req, true);
     case NVME_ID_CNS_CS_IND_NS:
         return nvme_identify_ns_ind(n, req, false);
     case NVME_ID_CNS_CS_IND_NS_ALLOCATED:
         return nvme_identify_ns_ind(n, req, true);
     case NVME_ID_CNS_CS_NS_PRESENT:
         return nvme_identify_ns_csi(n, req, false);
-    case NVME_ID_CNS_CTRL:
+    case NVME_ID_CNS_CTRL: // 1
         return nvme_identify_ctrl(n, req);
-    case NVME_ID_CNS_CS_CTRL:
-        return nvme_identify_ctrl_csi(n, req);
-    case NVME_ID_CNS_NS_ACTIVE_LIST:
-        return nvme_identify_nslist(n, req, true);
+        return 0 && nvme_identify_ctrl(n, req);
+    case NVME_ID_CNS_CS_CTRL: // 6
+        // return nvme_identify_ctrl_csi(n, req);
+        return 0 && nvme_identify_ctrl_csi(n, req);
+    case NVME_ID_CNS_NS_ACTIVE_LIST: // 2
+        // return nvme_identify_nslist(n, req, true);
+        return 0 && nvme_identify_nslist(n, req, true);
     case NVME_ID_CNS_NS_PRESENT_LIST:
         return nvme_identify_nslist(n, req, false);
     case NVME_ID_CNS_CS_NS_ACTIVE_LIST:
@@ -6048,7 +6053,7 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req)
         return nvme_endurance_group_list(n, req);
     case NVME_ID_CNS_CS_NS_PRESENT_LIST:
         return nvme_identify_nslist_csi(n, req, false);
-    case NVME_ID_CNS_NS_DESCR_LIST:
+    case NVME_ID_CNS_NS_DESCR_LIST: // 3
         return nvme_identify_ns_descr_list(n, req);
     case NVME_ID_CNS_IO_COMMAND_SET:
         return nvme_identify_cmd_set(n, req);
@@ -7309,7 +7314,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
     case NVME_ADM_CMD_CREATE_CQ:
         return nvme_create_cq(n, req);
     case NVME_ADM_CMD_IDENTIFY:
-        return 0 && nvme_identify(n, req);
+        return nvme_identify(n, req);
+        // return 0 && nvme_identify(n, req);
     case NVME_ADM_CMD_ABORT:
         return nvme_abort(n, req);
     case NVME_ADM_CMD_SET_FEATURES:
@@ -7449,6 +7455,7 @@ static void nvme_process_sq(void *opaque)
 
         addr = sq->dma_addr + (sq->head << NVME_SQES);
         if (nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd))) {
+            printf("[nvme_process_sq] nvme_addr_read error!!\n");
             trace_pci_nvme_err_addr_read(addr);
             trace_pci_nvme_err_cfs();
             stl_le_p(&n->bar.csts, NVME_CSTS_FAILED);
@@ -7464,6 +7471,7 @@ static void nvme_process_sq(void *opaque)
             ret = nvme_atomic_write_check(n, &cmd, atomic);
             switch (ret) {
             case NVME_ATOMIC_NO_START:
+                break;
                 qemu_bh_schedule(sq->bh);
                 return;
             case NVME_ATOMIC_START_ATOMIC:
@@ -7485,9 +7493,39 @@ static void nvme_process_sq(void *opaque)
         if (sq->sqid && atomic) {
             req->atomic_write = cmd_is_atomic;
         }
-        
-        status = sq->sqid ? nvme_io_cmd(n, req) :
+        printf("[nvme_process_sq] SQ %d opcode=0x%02X tail=0x%02X head=%02X\n", sq->sqid, req->cmd.opcode, sq->tail, sq->head);
+        // if (sq->sqid)
+        // {
+        //     printf("[nvme_process_sq] Processing IO Qpair with msix\n");
+        //     printf("[nvme_process_sq] vector=%d\n", cq->vector);
+        //     // PCIDevice *pci_dev = PCI_DEVICE(n);
+        //     QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
+        //     QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
+            
+        //     QTAILQ_REMOVE(&cq->req_list, req, entry);
+
+        //     nvme_inc_cq_tail(cq);
+        //     nvme_sg_unmap(&req->sg);
+
+        //     // if (QTAILQ_EMPTY(&sq->req_list) && !nvme_sq_empty(sq)) {
+        //     //     qemu_bh_schedule(sq->bh);
+        //     // }
+
+        //     QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
+
+
+        //     nvme_irq_assert(n, cq);
+        //     continue;
+        // }
+
+        status = sq->sqid ? (0 && nvme_io_cmd(n, req)) :
             nvme_admin_cmd(n, req);
+        printf("Status = %d\n", status);
+        // if (status == NVME_NO_COMPLETE && sq->sqid != 0) 
+        // {
+        //     req->status = status;
+        //     nvme_enqueue_req_completion(cq, req);
+        // }
         if (status != NVME_NO_COMPLETE) {
             req->status = status;
             nvme_enqueue_req_completion(cq, req);
@@ -8003,6 +8041,37 @@ static uint64_t send_mmio_op_to_phison_model(NvmeCtrl *n, hwaddr addr, unsigned 
     return result.data;
 }
 
+static void send_mmio_op_to_phison_model_ver2(PhisonMMIoOpResult* result, NvmeCtrl *n, hwaddr addr, unsigned size, unsigned op, uint64_t data){
+    PhisonMMIoOpInfo info = {0};
+    info.op = op;
+    info.size = size;
+    info.offset = addr;
+    info.data = data;
+    int bytes_sent = send(n->phison_model_client_socket, &info, sizeof(PhisonMMIoOpInfo), 0);
+    if (bytes_sent < 0) {
+        printf("nvme phison model socket send fail\n");
+        result->result = PHISON_MODEL_MMIO_RESULT_FAIL;
+        return;
+    }
+    
+    int bytes_received = recv(n->phison_model_client_socket, result, sizeof(PhisonMMIoOpResult), 0);
+
+    if (bytes_received == 0) {
+        // The client has closed the connection
+        printf("nvme phison model socket model closed connection\n");
+        close(n->phison_model_client_socket);
+        n->phison_model_client_socket = -1;
+        result->result = PHISON_MODEL_MMIO_RESULT_FAIL;
+        return;
+    } else if (bytes_received < 0) {
+        printf("nvme phison model socket recv fail\n");
+        close(n->phison_model_client_socket);
+        n->phison_model_client_socket = -1;
+        result->result = PHISON_MODEL_MMIO_RESULT_FAIL;
+        return;
+    } 
+}
+
 static uint64_t send_mmio_op_to_phison_model_pci(PCIDevice *dev, hwaddr addr, unsigned size, unsigned op, uint64_t data){
     NvmeCtrl *n = NVME(dev);
     PhisonMMIoOpInfo info = {0};
@@ -8244,6 +8313,7 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
     if (addr < sizeof(n->bar)) {
         nvme_write_bar(n, addr, data, size);
     } else {
+        return; /* For ver2*/
         nvme_process_db(n, addr, data);
     }
 }
@@ -8296,9 +8366,9 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
 
 static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t data,
                             unsigned size)
-{
+{    
     NvmeCtrl *n = (NvmeCtrl *)opaque;
-
+    PCIDevice *pci = PCI_DEVICE(n);
     // trace_pci_nvme_mmio_write(addr, data, size);
 
     // if (pci_is_vf(PCI_DEVICE(n)) && !nvme_sctrl(n)->scs &&
@@ -8306,10 +8376,20 @@ static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t dat
     //     trace_pci_nvme_err_ignored_mmio_vf_offline(addr, size);
     //     return;
     // }
-
+    printf("Writing to addr=0x%lX | data=0x%lX\n", addr, data);
+    // send_mmio_op_to_phison_model(n , addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
     nvme_mmio_write(opaque, addr, data, size);
-    send_mmio_op_to_phison_model(n , addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
-
+    // return;
+    PhisonMMIoOpResult *result = g_malloc0(sizeof(PhisonMMIoOpResult));
+    send_mmio_op_to_phison_model_ver2(result, n, addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
+    printf("result.result = %ld | result.data = %ld\n", result->result, result->data);
+    if (result->result == PHISON_MODEL_MMIO_RESULT_MSIX)
+    {
+        printf("Assert MSIX...\n");
+        uint64_t vector = result->data;
+        msix_notify(pci, vector);
+    }
+    free(result);
 }
 
 static const MemoryRegionOps nvme_mmio_ops = {
@@ -8891,7 +8971,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->mdts = n->params.mdts;
     id->ver = cpu_to_le32(NVME_SPEC_VER);
     id->oacs =
-        cpu_to_le16(NVME_OACS_NS_MGMT | NVME_OACS_FORMAT | NVME_OACS_DBBUF |
+        cpu_to_le16(NVME_OACS_NS_MGMT | NVME_OACS_FORMAT | //NVME_OACS_DBBUF |
                     NVME_OACS_DIRECTIVES);
     id->cntrltype = 0x1;
 
