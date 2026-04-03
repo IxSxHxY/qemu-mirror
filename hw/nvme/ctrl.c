@@ -8357,11 +8357,17 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
     //  */
     // if (addr == NVME_REG_PMRSTS &&
     //     (NVME_PMRCAP_PMRWBM(ldl_le_p(&n->bar.pmrcap)) & 0x02)) {
-    //     memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
+    //     memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);ll
     // }
     uint64_t ret_val = nvme_mmio_read(opaque, addr, size);
-    send_mmio_op_to_phison_model(n, addr, size, PHISON_MODEL_MMIO_OP_READ, 0);
-    return ret_val;
+    
+    // send_mmio_op_to_phison_model(n, addr, size, PHISON_MODEL_MMIO_OP_READ, 0);
+    PhisonMMIoOpResult result;
+    send_mmio_op_to_phison_model_ver2(&result, n, addr, size, PHISON_MODEL_MMIO_OP_READ, 0);
+    uint64_t ret_val2 = result.data;
+    printf("[MMIO 18299] Op:0 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%lX | Data_model: 0x%lx\n", size, (uint32_t)addr, ret_val, ret_val2);
+    // printf("[MMIO 18299] Op:0 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data_model: 0x%lx\n", size, (uint32_t)addr, ret_val2);
+    return ret_val2;
 }
 
 static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t data,
@@ -8376,20 +8382,27 @@ static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t dat
     //     trace_pci_nvme_err_ignored_mmio_vf_offline(addr, size);
     //     return;
     // }
-    printf("Writing to addr=0x%lX | data=0x%lX\n", addr, data);
+    printf("[MMIO 18299] Op:1 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%lX\n", size, (uint32_t)addr, data);
     // send_mmio_op_to_phison_model(n , addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
     nvme_mmio_write(opaque, addr, data, size);
     // return;
-    PhisonMMIoOpResult *result = g_malloc0(sizeof(PhisonMMIoOpResult));
-    send_mmio_op_to_phison_model_ver2(result, n, addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
-    printf("result.result = %ld | result.data = %ld\n", result->result, result->data);
-    if (result->result == PHISON_MODEL_MMIO_RESULT_MSIX)
+    PhisonMMIoOpResult result;
+    send_mmio_op_to_phison_model_ver2(&result, n, addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
+    printf("result.result = %ld | result.data = %ld\n", result.result, result.data);
+    if (result.result == PHISON_MODEL_MMIO_RESULT_MSIX)
     {
         printf("Assert MSIX...\n");
-        uint64_t vector = result->data;
+        uint64_t vector = result.data;
+        if (!pci->msix_entry_used[vector])
+        {
+            msix_vector_use(pci, vector);
+        }
         msix_notify(pci, vector);
+        printf("MSIX completed!\n");
     }
-    free(result);
+    
+    return;
+    send_mmio_op_to_phison_model(n , addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
 }
 
 static const MemoryRegionOps nvme_mmio_ops = {
