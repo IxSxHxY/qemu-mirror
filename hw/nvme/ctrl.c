@@ -8103,6 +8103,38 @@ static uint64_t send_mmio_op_to_phison_model_pci(PCIDevice *dev, hwaddr addr, un
     return result.data;
 }
 
+static void send_mmio_op_to_phison_model_pci_ver2(PhisonMMIoOpResult* result, PCIDevice *dev, hwaddr addr, unsigned size, unsigned op, uint64_t data){
+    NvmeCtrl *n = NVME(dev);
+    PhisonMMIoOpInfo info = {0};
+    info.op = op;
+    info.size = size;
+    info.offset = addr;
+    info.data = data;
+    int bytes_sent = send(n->phison_model_pci_client_socket, &info, sizeof(PhisonMMIoOpInfo), 0);
+    if (bytes_sent < 0) {
+        printf("nvme phison model socket send fail\n");
+        result->result = PHISON_MODEL_MMIO_RESULT_FAIL;
+        return;
+    }
+    
+    int bytes_received = recv(n->phison_model_pci_client_socket, result, sizeof(PhisonMMIoOpResult), 0);
+
+    if (bytes_received == 0) {
+        // The client has closed the connection
+        printf("nvme phison model pci socket model closed connection\n");
+        close(n->phison_model_pci_client_socket);
+        n->phison_model_pci_client_socket = -1;
+        result->result = PHISON_MODEL_MMIO_RESULT_FAIL;
+        return;
+    } else if (bytes_received < 0) {
+        printf("nvme phison model pci socket recv fail\n");
+        close(n->phison_model_pci_client_socket);
+        n->phison_model_pci_client_socket = -1;
+        result->result = PHISON_MODEL_MMIO_RESULT_FAIL;
+        return;
+    } 
+}
+
 static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
@@ -8363,6 +8395,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
     
     // send_mmio_op_to_phison_model(n, addr, size, PHISON_MODEL_MMIO_OP_READ, 0);
     PhisonMMIoOpResult result;
+    
     send_mmio_op_to_phison_model_ver2(&result, n, addr, size, PHISON_MODEL_MMIO_OP_READ, 0);
     uint64_t ret_val2 = result.data;
     printf("[MMIO 18299] Op:0 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%lX | Data_model: 0x%lx\n", size, (uint32_t)addr, ret_val, ret_val2);
@@ -8820,24 +8853,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     unsigned nr_vectors;
     int ret;
 
-    pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
-    pci_config_set_prog_interface(pci_conf, 0x2);
-
-    if (n->params.use_intel_id) {
-        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
-        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
-    } else {
-        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REDHAT);
-        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REDHAT_NVME);
-    }
-
-    pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
-    nvme_add_pm_capability(pci_dev, 0x60);
-    pcie_endpoint_cap_init(pci_dev, 0x80);
-    pcie_cap_flr_init(pci_dev);
-    if (n->params.sriov_max_vfs) {
-        pcie_ari_init(pci_dev, 0x100);
-    }
+    printf("[nvme_init_pci] Init MSIX ...\n");
 
     if (n->params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
         bar_size = nvme_mbar_size(n->params.max_ioqpairs + 1, 0, NULL, NULL);
@@ -8885,7 +8901,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 
         ret = msix_init(pci_dev, nr_vectors,
                         &n->bar0, 0, msix_table_offset,
-                        &n->bar0, 0, msix_pba_offset, 0, errp);
+                        &n->bar0, 0, msix_pba_offset, 0x40, errp); // fix at 0x40
     }
 
     if (ret == -ENOTSUP) {
@@ -8900,6 +8916,26 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     nvme_update_msixcap_ts(pci_dev, n->conf_msix_qsize);
 
     pcie_cap_deverr_init(pci_dev);
+    return true;
+
+    pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
+    pci_config_set_prog_interface(pci_conf, 0x2);
+
+    if (n->params.use_intel_id) {
+        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
+        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
+    } else {
+        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REDHAT);
+        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REDHAT_NVME);
+    }
+
+    pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
+    nvme_add_pm_capability(pci_dev, 0x60);
+    pcie_endpoint_cap_init(pci_dev, 0x80);
+    pcie_cap_flr_init(pci_dev);
+    if (n->params.sriov_max_vfs) {
+        pcie_ari_init(pci_dev, 0x100);
+    }
 
     /* DOE Initialisation */
     if (pci_dev->spdm_port) {
@@ -8932,6 +8968,128 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 
     return true;
 }
+
+// static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
+// {
+//     ERRP_GUARD();
+//     uint8_t *pci_conf = pci_dev->config;
+//     uint64_t bar_size;
+//     unsigned msix_table_offset = 0, msix_pba_offset = 0;
+//     unsigned nr_vectors;
+//     int ret;
+
+//     pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
+//     pci_config_set_prog_interface(pci_conf, 0x2);
+
+//     if (n->params.use_intel_id) {
+//         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
+//         pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
+//     } else {
+//         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REDHAT);
+//         pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REDHAT_NVME);
+//     }
+
+//     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
+//     nvme_add_pm_capability(pci_dev, 0x60);
+//     pcie_endpoint_cap_init(pci_dev, 0x80);
+//     pcie_cap_flr_init(pci_dev);
+//     if (n->params.sriov_max_vfs) {
+//         pcie_ari_init(pci_dev, 0x100);
+//     }
+
+//     if (n->params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
+//         bar_size = nvme_mbar_size(n->params.max_ioqpairs + 1, 0, NULL, NULL);
+//         memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+//                               bar_size);
+//         pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
+//                          PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
+//         ret = msix_init_exclusive_bar(pci_dev, n->params.msix_qsize, 4, errp);
+//     } else {
+//         assert(n->params.msix_qsize >= 1);
+
+//         /* add one to max_ioqpairs to account for the admin queue pair */
+//         if (!pci_is_vf(pci_dev)) {
+//             nr_vectors = n->params.msix_qsize;
+//             bar_size = nvme_mbar_size(n->params.max_ioqpairs + 1,
+//                                       nr_vectors, &msix_table_offset,
+//                                       &msix_pba_offset);
+//         } else {
+//             NvmeCtrl *pn = NVME(pcie_sriov_get_pf(pci_dev));
+//             NvmePriCtrlCap *cap = &pn->pri_ctrl_cap;
+
+//             nr_vectors = le16_to_cpu(cap->vifrsm);
+//             bar_size = nvme_mbar_size(le16_to_cpu(cap->vqfrsm), nr_vectors,
+//                                       &msix_table_offset, &msix_pba_offset);
+//         }
+
+//         memory_region_init(&n->bar0, OBJECT(n), "nvme-bar0", bar_size);
+//         // memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+//         //                       msix_table_offset);
+//         if(PHISON_MODEL_MODE_ENABLED(n)){
+//             memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops_phison, n, "nvme",
+//                                 msix_table_offset);
+//         }else{
+//             memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+//                                 msix_table_offset);
+//         }
+//         memory_region_add_subregion(&n->bar0, 0, &n->iomem);
+
+//         if (pci_is_vf(pci_dev)) {
+//             pcie_sriov_vf_register_bar(pci_dev, 0, &n->bar0);
+//         } else {
+//             pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
+//                              PCI_BASE_ADDRESS_MEM_TYPE_64, &n->bar0);
+//         }
+
+//         ret = msix_init(pci_dev, nr_vectors,
+//                         &n->bar0, 0, msix_table_offset,
+//                         &n->bar0, 0, msix_pba_offset, 0, errp);
+//     }
+
+//     if (ret == -ENOTSUP) {
+//         /* report that msix is not supported, but do not error out */
+//         warn_report_err(*errp);
+//         *errp = NULL;
+//     } else if (ret < 0) {
+//         /* propagate error to caller */
+//         return false;
+//     }
+
+//     nvme_update_msixcap_ts(pci_dev, n->conf_msix_qsize);
+
+//     pcie_cap_deverr_init(pci_dev);
+
+//     /* DOE Initialisation */
+//     if (pci_dev->spdm_port) {
+//         uint16_t doe_offset = n->params.sriov_max_vfs ?
+//                                   PCI_CONFIG_SPACE_SIZE + PCI_ARI_SIZEOF
+//                                   : PCI_CONFIG_SPACE_SIZE;
+
+//         pcie_doe_init(pci_dev, &pci_dev->doe_spdm, doe_offset,
+//                       doe_spdm_prot, true, 0);
+
+//         pci_dev->doe_spdm.spdm_socket = spdm_socket_connect(pci_dev->spdm_port,
+//                                                             errp);
+
+//         if (pci_dev->doe_spdm.spdm_socket < 0) {
+//             return false;
+//         }
+//     }
+
+//     if (n->params.cmb_size_mb) {
+//         nvme_init_cmb(n, pci_dev);
+//     }
+
+//     if (n->pmr.dev) {
+//         nvme_init_pmr(n, pci_dev);
+//     }
+
+//     if (!pci_is_vf(pci_dev) && n->params.sriov_max_vfs) {
+//         nvme_init_sriov(n, pci_dev, 0x120);
+//     }
+
+//     return true;
+// }
 
 static void nvme_init_subnqn(NvmeCtrl *n)
 {
@@ -9406,8 +9564,15 @@ static void nvme_pci_write_config(PCIDevice *dev, uint32_t address,
 static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
                                   uint32_t val, int len)
 {
-    nvme_pci_write_config(dev, address, val, len);
-    send_mmio_op_to_phison_model_pci(dev, address, len, PHISON_MODEL_PCI_CFG_OP_WRITE, val);
+    pci_default_write_config(dev, address, val, len); // Inside got MSIX cap config write
+    PhisonMMIoOpResult result;
+    send_mmio_op_to_phison_model_pci_ver2(&result, dev, address, len, PHISON_MODEL_MMIO_OP_WRITE, val);
+    // uint64_t ret_val = result.data;
+    
+    // printf("[MMIO 18300] Op:1 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%X\n", len, (uint32_t)address, val);
+    printf("[MMIO 18300] Op:1 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%X\n", len, (uint32_t)address, val);
+    return;
+    send_mmio_op_to_phison_model_pci(dev, address, len, PHISON_MODEL_MMIO_OP_WRITE, val);
 }
 
 static uint32_t nvme_pci_read_config(PCIDevice *dev, uint32_t address, int len)
@@ -9424,8 +9589,13 @@ static uint32_t nvme_pci_read_config(PCIDevice *dev, uint32_t address, int len)
 static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t address, int len)
 {
     uint32_t ret_val = nvme_pci_read_config(dev, address, len);
-    send_mmio_op_to_phison_model_pci(dev, address, len, PHISON_MODEL_PCI_CFG_OP_READ, 0);
-    return ret_val;
+    PhisonMMIoOpResult result;
+    send_mmio_op_to_phison_model_pci_ver2(&result, dev, address, len, PHISON_MODEL_MMIO_OP_READ, 0);
+    uint64_t ret_val2 = result.data;
+    // printf("[MMIO 18300] Op:0 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%X\n", len, (uint32_t)address, ret_val);
+    printf("[MMIO 18300] Op:0 (0:Read|1:Write) | Sz:%d | Addr:0x%X | Data:0x%X | Data_model: 0x%lx\n", len, (uint32_t)address, ret_val, ret_val2);
+    return ret_val2;
+    send_mmio_op_to_phison_model_pci(dev, address, len, PHISON_MODEL_MMIO_OP_READ, 0);
 }
 
 static const VMStateDescription nvme_vmstate = {
