@@ -567,8 +567,9 @@ typedef struct NvmeParams {
     uint32_t  sriov_max_vq_per_vf;
     uint32_t  sriov_max_vi_per_vf;
     char *phison_model_ip;
-    uint16_t phison_model_port;
+    uint16_t phison_model_nvme_port;
     uint16_t phison_model_pci_port;
+    uint16_t phison_model_rpc_port;
     bool     msix_exclusive_bar;
 
     struct {
@@ -659,9 +660,18 @@ typedef struct NvmeCtrl {
         uint16_t    vqrfap;
         uint16_t    virfap;
     } next_pri_ctrl_cap;    /* These override pri_ctrl_cap after reset */
-    // int phison_model_server_socket;
-    int phison_model_client_socket;
+
+    int phison_model_nvme_client_socket;
     int phison_model_pci_client_socket;
+    int phison_model_rpc_client_socket;
+
+    struct {
+        QemuThread thread;
+        QemuMutex lock;
+        QemuCond cond;
+        bool running;    // 用來標記執行緒是否有工作在跑，或是否處於活躍狀態
+    } rpc_thread;
+
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
 } NvmeCtrl;

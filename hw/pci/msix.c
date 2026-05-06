@@ -531,15 +531,18 @@ void msix_notify(PCIDevice *dev, unsigned vector)
     if (!dev->msix_entry_used[vector]) {
         return;
     }
-
+    printf("[msix_notify] enabled vector %d successfully!\n", vector);
     if (msix_is_masked(dev, vector)) {
+        printf("[msix_notify] vector %d is masked!\n", vector);
         msix_set_pending(dev, vector);
         return;
     }
+    
 
     msg = msix_get_message(dev, vector);
 
     msi_send_message(dev, msg);
+    printf("[msix_notify] vector %d is sent!\n", vector);
 }
 
 void msix_reset(PCIDevice *dev)
