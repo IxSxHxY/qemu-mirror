@@ -7453,12 +7453,6 @@ static void nvme_process_sq(void *opaque)
     if (n->dbbuf_enabled) {
         nvme_update_sq_tail(sq);
     }
-<<<<<<< Updated upstream
-=======
-    // printf("Processing SQ!!!!\n");
-    // sleep(10);
-    // printf("After 5 seconds of Processing SQ!!!!\n");
->>>>>>> Stashed changes
 
     while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list))) {
         NvmeAtomic *atomic;
@@ -7504,7 +7498,20 @@ static void nvme_process_sq(void *opaque)
         if (sq->sqid && atomic) {
             req->atomic_write = cmd_is_atomic;
         }
-        printf("[nvme_process_sq] SQ %d opcode=0x%02X tail=0x%02X head=%02X\n", sq->sqid, req->cmd.opcode, sq->tail, sq->head);
+        // printf("[nvme_process_sq] SQ %d opcode=0x%02X tail=0x%02X head=%02X\n", sq->sqid, req->cmd.opcode, sq->tail, sq->head);
+        // printf("[nvme_process_sq] SQ %d Head = %u | Tail = %u\n", sq->sqid, sq->head, sq->tail);
+        // printf("[nvme_process_sq] SQE opcode = 0x%X | cid = 0x%X | nsid = 0x%X | dptr.prp1 = 0x%lX | dptr.prp2 = 0x%lX | cdw10 = 0x%X | cdw11 = 0x%X | cdw12 = 0x%X | cdw13 = 0x%X | cdw14 = 0x%X | cdw15 = 0x%X\n\n",
+        //     req->cmd.opcode,
+        //     req->cmd.cid,
+        //     req->cmd.nsid,
+        //     req->cmd.dptr.prp1,
+        //     req->cmd.dptr.prp2,
+        //     req->cmd.cdw10,
+        //     req->cmd.cdw11,
+        //     req->cmd.cdw12,
+        //     req->cmd.cdw13,
+        //     req->cmd.cdw14,
+        //     req->cmd.cdw15);
         // if (sq->sqid)
         // {
         //     printf("[nvme_process_sq] Processing IO Qpair with msix\n");
@@ -8471,6 +8478,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
             final_val = resp.data;
         } else {
             // 如果失敗，socket_use 內部會印出錯誤，這裡做標記即可
+            final_val = 0;
             printf("[MMIO 18299] Read failed, using local value\n");
         }
     }
@@ -9625,14 +9633,6 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
         printf("[nvme_init] Registered RPC read handler for socket %d\n", n->phison_model_rpc_client_socket);
 
     }
-
-    qemu_mutex_init(&n->rpc_thread.lock);
-    qemu_cond_init(&n->rpc_thread.cond);
-    n->rpc_thread.running = false;
-
-    // qemu_thread_create(&n->rpc_thread.thread, "nvme-rpc-thread",
-    //                    nvme_rpc_thread, n, QEMU_THREAD_JOINABLE);
-    printf("Thread created successfully!\n");
     
     printf("nvme realize done\n");
     fflush(stdout);
@@ -9821,6 +9821,7 @@ static void nvme_pci_write_config(PCIDevice *dev, uint32_t address,
     pci_default_write_config(dev, address, val, len);
     pcie_cap_flr_write_config(dev, address, val, len);
     nvme_sriov_post_write_config(dev, old_num_vfs);
+    
 }
 
 // static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
@@ -9844,6 +9845,7 @@ static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
 
     // 先更新 QEMU 內部的配置空間狀態
     pci_default_write_config(dev, address, val, len);
+    // nvme_pci_write_config(dev, address, val, len);
 
     PhisonMMIoOpInfo info = {
         .op     = PHISON_MODEL_MMIO_OP_WRITE,
