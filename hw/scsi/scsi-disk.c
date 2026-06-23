@@ -143,38 +143,159 @@ typedef struct QEMU_PACKED PhisonTesterOpResult
     uint64_t data;
 } PhisonTesterOpResult;
 
+// try reconnect one socket，timeout set to 1 sec
+// return fd if success, else -1
+static int phison_model_try_connect(const char *ip, uint16_t port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        close(fd);
+        return -1;
+    }
+
+    // set socket to non-blocking，then only do timeout connect
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -1;
+    }
+
+    // select to wait for 1 seconds
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+
+    ret = select(fd + 1, NULL, &wfds, NULL, &tv);
+    if (ret <= 0) {
+        // timeout 或 error
+        close(fd);
+        return -1;
+    }
+
+    // confirm is connect() succeed
+    int err = 0;
+    socklen_t errlen = sizeof(err);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+    if (err != 0) {
+        close(fd);
+        return -1;
+    }
+
+    // back to blocking mode
+    fcntl(fd, F_SETFL, flags);
+
+    return fd;
+}
+
+// reconnect all socket
+// return true if all connection success, else false
+static bool phison_model_reconnect_scsi(SCSIDiskState *s)
+{
+    const char *ip = s->simulate_one_port_ip;
+
+    printf("[Reconnect] Attempting to reconnect one port sockets...\n");
+
+    // --- NVMe socket ---
+    if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)) {
+        if (s->simulate_one_port_socket >= 0) {
+            close(s->simulate_one_port_socket);
+            s->simulate_one_port_socket = -1;
+        }
+
+        int fd = phison_model_try_connect(ip, s->simulate_one_port_port);
+        if (fd < 0) {
+            printf("[Reconnect] NVMe socket failed\n");
+            return false;
+        }
+        s->simulate_one_port_socket = fd;
+        printf("[Reconnect] One Port socket OK (fd=%d)\n", fd);
+    }
+
+    printf("[Reconnect] One port socket reconnected successfully\n");
+    return true;
+}
+
+static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is_send) 
+{
+    if (sock_fd < 0 || !data || size == 0) {
+        return -1;
+    }
+
+    if (is_send) {
+        // --- perform send() ---
+        ssize_t sent = send(sock_fd, data, size, 0);
+        if (sent < (ssize_t)size) {
+            printf("[Socket %d] Send 失敗: %ld/%ld bytes\n", sock_fd, sent, size);
+            return -1;
+        }
+    } 
+    else {
+        // --- perform recv() ---
+        // use MSG_WAITALL to make sure receive full size of data
+        ssize_t received = recv(sock_fd, data, size, MSG_WAITALL);
+
+        if (received < (ssize_t)size) {
+            if (received == 0) {
+                printf("[Socket %d] Connection closed by model\n", sock_fd);
+            } else {
+                printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes\n", 
+                        sock_fd, received, size);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
 {
-    // SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
     PhisonTesterOpInfo info = {0};
     PhisonTesterOpResult result = {0};
     memcpy(info.cdb, cdb, sizeof(info.cdb));
-    int bytes_sent = send(s->simulate_one_port_socket, &info, sizeof(PhisonTesterOpInfo), 0);
-    if (bytes_sent < 0)
-    {
-        printf("nvme phison model pci socket send fail\n");
-        return 0;
+    uint64_t final_val = 0;
+
+    // --- first try ---
+    int sock_fd = s->simulate_one_port_socket;
+    if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0 &&
+        phison_model_socket_use(sock_fd, &result, sizeof(result), false) == 0) {
+        final_val = result.data;
+        goto done;
     }
 
-    int bytes_received = recv(s->simulate_one_port_socket, &result, sizeof(PhisonTesterOpResult), 0);
+    // --- first fail, try reconnect ---
+    printf("[CDB SEND] Socket error, attempting reconnect...\n");
+    // ⚠️ 請確保此重連函式會更新 s->simulate_one_port_socket 的值
+    if (!phison_model_reconnect_scsi(s)) {
+        printf("[CDB SEND] Reconnect failed, returning 0\n");
+        final_val = 0;
+        goto done;
+    }
 
-    if (bytes_received == 0)
-    {
-        // The client has closed the connection
-        printf("nvme phison model pci socket model closed connection\n");
-        close(s->simulate_one_port_socket);
-        s->simulate_one_port_socket = -1;
-        return 0;
+    // --- Retry ---
+    sock_fd = s->simulate_one_port_socket;
+    memset(&result, 0, sizeof(result));
+    if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0 &&
+        phison_model_socket_use(sock_fd, &result, sizeof(result), false) == 0) {
+        final_val = result.data;
+    } else {
+        printf("[CDB SEND] Retry failed, returning 0\n");
+        final_val = 0;
     }
-    else if (bytes_received < 0)
-    {
-        printf("nvme phison model pci socket recv fail\n");
-        close(s->simulate_one_port_socket);
-        s->simulate_one_port_socket = -1;
-        return 0;
-    }
-    return result.data;
-    // return 0;
+
+done:
+    return final_val;
 }
 
 static void scsi_free_request(SCSIRequest *req)
