@@ -581,6 +581,12 @@ typedef struct NvmeParams {
     bool     atomic_dn;
 } NvmeParams;
 
+typedef enum {
+    PHISON_CONN_CONNECTED,
+    PHISON_CONN_DISCONNECTED,
+    PHISON_CONN_RECONNECTING,
+} PhisonConnState;
+
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
@@ -671,6 +677,10 @@ typedef struct NvmeCtrl {
         QemuCond cond;
         bool running;    // 用來標記執行緒是否有工作在跑，或是否處於活躍狀態
     } rpc_thread;
+
+    PhisonConnState  phison_conn_state;
+    QEMUTimer       *phison_reconnect_timer;
+    int              phison_reconnect_fd; 
 
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
