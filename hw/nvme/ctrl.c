@@ -8704,32 +8704,32 @@ static void phison_pci_disconnect_handler(void *opaque)
     }
 }
 
-// static void phison_rpc_disconnect_handler(void *opaque)
-// {
-//     printf("This is phison_rpc_disconnect_handler\n");
-//     NvmeCtrl *n = opaque;
-//     int fd = n->phison_model_rpc_client_socket;
+static void phison_rpc_disconnect_handler(void *opaque)
+{
+    printf("This is phison_rpc_disconnect_handler\n");
+    NvmeCtrl *n = opaque;
+    int fd = n->phison_model_rpc_client_socket;
 
-//     char buf[1];
-//     int ret = recv(fd, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT);
+    char buf[1];
+    int ret = recv(fd, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT);
 
-//     if (ret == 0) {
-//         printf("[RPC Socket] Disconnected (EOF), triggering reconnect\n");
-//         qemu_set_fd_handler(n->phison_model_rpc_client_socket, NULL, NULL, NULL);
-//         close(n->phison_model_rpc_client_socket);
-//         n->phison_model_rpc_client_socket = -1;
-//         phison_on_disconnect(n);
-//         return;
-//     } else if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-//         printf("[RPC Socket] Disconnected (errno=%d: %s), triggering reconnect\n",
-//                errno, strerror(errno));
-//         phison_on_disconnect(n);
-//         return;
-//     }
+    if (ret == 0) {
+        printf("[RPC Socket] Disconnected (EOF), triggering reconnect\n");
+        qemu_set_fd_handler(n->phison_model_rpc_client_socket, NULL, NULL, NULL);
+        close(n->phison_model_rpc_client_socket);
+        n->phison_model_rpc_client_socket = -1;
+        phison_on_disconnect(n);
+        return;
+    } else if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        printf("[RPC Socket] Disconnected (errno=%d: %s), triggering reconnect\n",
+               errno, strerror(errno));
+        phison_on_disconnect(n);
+        return;
+    }
 
-//     // 有實際資料，交給原本的 RPC handler
-//     phison_rpc_read_handler(opaque);
-// }
+    // 有實際資料，交給原本的 RPC handler
+    phison_rpc_read_handler(opaque);
+}
 
 // ============================================================
 // 重連失敗：關掉全部 socket，schedule cooldown timer
@@ -8994,28 +8994,6 @@ static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t dat
  
     printf("[MMIO 18299] Write | Addr:0x%08lX | Sz:%d | Data:0x%08lX\n", addr, size, data);
 }
-
-// static void phison_rpc_disconnect_handler(void *opaque)
-// {
-//     NvmeCtrl *n = opaque;
-//     int fd = n->phison_model_rpc_client_socket;
- 
-//     struct pollfd pfd = {
-//         .fd     = fd,
-//         .events = POLLRDHUP
-//     };
-//     poll(&pfd, 1, 0);
- 
-//     if (pfd.revents & (POLLHUP | POLLRDHUP | POLLERR)) {
-//         printf("[RPC Socket] Disconnected (revents=0x%x), triggering reconnect\n",
-//                pfd.revents);
-//         phison_on_disconnect(n);
-//         return;
-//     }
- 
-//     // RPC 正常有資料進來，交給原本的 handler 處理
-//     phison_rpc_read_handler(opaque);
-// }
 
 static const MemoryRegionOps nvme_mmio_ops = {
     .read = nvme_mmio_read,
@@ -9992,7 +9970,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
         // 告訴 QEMU 的 Main Loop：「當這個 RPC Socket 有資料可以讀的時候，請呼叫 phison_rpc_read_handler」
-        qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_read_handler, NULL, n);
+        qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_disconnect_handler, NULL, n);
 
         printf("[nvme_init] Registered RPC read handler for socket %d\n", n->phison_model_rpc_client_socket);
 
