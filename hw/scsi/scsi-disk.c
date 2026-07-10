@@ -58,6 +58,8 @@
 
 #define TYPE_SCSI_DISK_BASE         "scsi-disk-base"
 
+#define PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)  ((s->simulate_one_port_port > 0) && (s->simulate_one_port_ip))
+
 OBJECT_DECLARE_TYPE(SCSIDiskState, SCSIDiskClass, SCSI_DISK_BASE)
 
 struct SCSIDiskClass {
@@ -111,7 +113,54 @@ struct SCSIDiskState {
      * 0xffff        - reserved
      */
     uint16_t rotation_rate;
+    char *simulate_one_port_ip;
+    uint16_t simulate_one_port_port;
+    int simulate_one_port_socket;
 };
+
+typedef struct QEMU_PACKED PhisonTesterOpInfo
+{
+    uint8_t cdb[16];
+} PhisonTesterOpInfo;
+
+typedef struct QEMU_PACKED PhisonTesterOpResult
+{
+    uint64_t result;
+    uint64_t data;
+} PhisonTesterOpResult;
+static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
+{
+    // SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+    PhisonTesterOpInfo info = {0};
+    PhisonTesterOpResult result = {0};
+    memcpy(info.cdb, cdb, sizeof(info.cdb));
+    int bytes_sent = send(s->simulate_one_port_socket, &info, sizeof(PhisonTesterOpInfo), 0);
+    if (bytes_sent < 0)
+    {
+        printf("nvme phison model pci socket send fail\n");
+        return 0;
+    }
+
+    int bytes_received = recv(s->simulate_one_port_socket, &result, sizeof(PhisonTesterOpResult), 0);
+
+    if (bytes_received == 0)
+    {
+        // The client has closed the connection
+        printf("nvme phison model pci socket model closed connection\n");
+        close(s->simulate_one_port_socket);
+        s->simulate_one_port_socket = -1;
+        return 0;
+    }
+    else if (bytes_received < 0)
+    {
+        printf("nvme phison model pci socket recv fail\n");
+        close(s->simulate_one_port_socket);
+        s->simulate_one_port_socket = -1;
+        return 0;
+    }
+    return result.data;
+    // return 0;
+}
 
 static void scsi_free_request(SCSIRequest *req)
 {
@@ -2566,6 +2615,38 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
     if (!s->product) {
         s->product = g_strdup("QEMU HARDDISK");
     }
+    
+    
+    s->simulate_one_port_socket = -1;
+    printf("[Tester] going into socket creation block\n");
+    fflush(stdout);
+    if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)){
+        struct sockaddr_in server_addr = {0};
+        s->simulate_one_port_socket = socket(AF_INET, SOCK_STREAM, 0);
+        //printf("client sock created\n");
+        //fflush(stdout);
+        if (s->simulate_one_port_socket < 0) {
+            error_setg(errp, "nvme phison model socket construct fail.");
+            return;
+        }
+
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(s->simulate_one_port_port);
+        
+        if (inet_pton(AF_INET, s->simulate_one_port_ip, &server_addr.sin_addr) <= 0) {
+            error_setg(errp, "nvme phison model socket inet pton fail.");
+            return;
+        }
+        //printf("inet_pton done\n");
+        //fflush(stdout);
+
+        if (connect(s->simulate_one_port_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            error_setg(errp, "nvme phison model socket connect fail.");
+            return;
+        }
+    }
+
+
     scsi_realize(&s->qdev, errp);
 out:
     if (ctx) {
@@ -2690,6 +2771,28 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     SCSIRequest *req;
     const SCSIReqOps *ops;
     uint8_t command;
+    // printf("scsi_new_request CDB Received: ");
+    // for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+    // {
+    //     printf("0x%02X ", buf[i]);
+    // }
+    // printf("\n");
+    if (buf[0] == 0x06 && buf[1] == 0xF0) 
+    {
+        printf("Vendor md received, forward to model code.\n");
+        for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+        {
+            printf("0x%02X ", buf[i]);
+        }
+        printf("\n");
+        if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
+        {
+            send_cdb_to_phison_model_tester(s, buf);
+        }
+        
+    }
+    
+
 
     command = buf[0];
     ops = scsi_disk_reqops_dispatch[command];
@@ -3161,6 +3264,8 @@ static Property scsi_hd_properties[] = {
                     quirks, SCSI_DISK_QUIRK_MODE_PAGE_VENDOR_SPECIFIC_APPLE,
                     0),
     DEFINE_BLOCK_CHS_PROPERTIES(SCSIDiskState, qdev.conf),
+        DEFINE_PROP_STRING("simulate_one_port_ip", SCSIDiskState, simulate_one_port_ip),
+    DEFINE_PROP_UINT16("simulate_one_port_port", SCSIDiskState, simulate_one_port_port, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
