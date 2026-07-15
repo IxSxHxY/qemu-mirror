@@ -93,6 +93,8 @@ typedef struct SCSIDiskReq {
     struct iovec iov;
     QEMUIOVector qiov;
     BlockAcctCookie acct;
+
+    int vendor_f0_result;
 } SCSIDiskReq;
 
 #define SCSI_DISK_F_REMOVABLE             0
@@ -143,39 +145,101 @@ typedef struct QEMU_PACKED PhisonTesterOpResult
     uint64_t data;
 } PhisonTesterOpResult;
 
-static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
+static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is_send) 
 {
-    // SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
-    PhisonTesterOpInfo info = {0};
-    PhisonTesterOpResult result = {0};
-    memcpy(info.cdb, cdb, sizeof(info.cdb));
-    int bytes_sent = send(s->simulate_one_port_socket, &info, sizeof(PhisonTesterOpInfo), 0);
-    if (bytes_sent < 0)
-    {
-        printf("nvme phison model pci socket send fail\n");
-        return 0;
+    if (sock_fd < 0 || !data || size == 0) {
+        return -1;
     }
 
-    int bytes_received = recv(s->simulate_one_port_socket, &result, sizeof(PhisonTesterOpResult), 0);
+    if (is_send) {
+        // --- 執行發送邏輯 ---
+        ssize_t sent = send(sock_fd, data, size, 0);
+        if (sent < (ssize_t)size) {
+            printf("[Socket %d] Send 失敗: %ld/%ld bytes\n", sock_fd, sent, size);
+            return -1;
+        }
+    } 
+    else {
+        // --- 執行接收邏輯 ---
+        // 使用 MSG_WAITALL 確保收齊 caller 指定的 size 長度
+        ssize_t received = recv(sock_fd, data, size, MSG_WAITALL);
 
-    if (bytes_received == 0)
-    {
-        // The client has closed the connection
-        printf("nvme phison model pci socket model closed connection\n");
-        close(s->simulate_one_port_socket);
-        s->simulate_one_port_socket = -1;
-        return 0;
+        if (received < (ssize_t)size) {
+            if (received == 0) {
+                printf("[Socket %d] Connection closed by model\n", sock_fd);
+            } else {
+                printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes\n", 
+                        sock_fd, received, size);
+            }
+            return -1;
+        }
     }
-    else if (bytes_received < 0)
-    {
-        printf("nvme phison model pci socket recv fail\n");
-        close(s->simulate_one_port_socket);
-        s->simulate_one_port_socket = -1;
-        return 0;
-    }
-    return result.data;
-    // return 0;
+
+    return 0;
 }
+
+static int scsi_disk_emulate_phison_vendor(SCSIDiskReq *r, uint8_t *outbuf)
+{
+    uint8_t *cdb = r->req.cmd.buf;
+
+    printf("[emulate_phison_vendor] sub-opcode=0x%02X, "
+           "vendor_f0_result=%d\n", cdb[2], r->vendor_f0_result);
+
+    if (cdb[1] != 0xF0) {
+        printf("[emulate_phison_vendor] cdb[1]=0x%02X != 0xF0, "
+               "not a phison vendor CDB\n", cdb[1]);
+        return -1;
+    }
+
+    /* recognized sub-opcode */
+    if (r->vendor_f0_result == GOOD) 
+    {
+        printf("[emulate_phison_vendor] sub-opcode=0x%02X recognized "
+                "model result was GOOD (result=%d)\n",
+                cdb[2], r->vendor_f0_result);
+        return 0;  /* model server unreachable / model rejected */
+    }
+    else 
+    {
+        printf("[emulate_phison_vendor] sub-opcode=0x%02X not "
+               "model result was GOOD (result=%d)\n", cdb[2], r->vendor_f0_result);
+        return -1;
+    }
+}
+
+// static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
+// {
+//     // SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+//     PhisonTesterOpInfo info = {0};
+//     PhisonTesterOpResult result = {0};
+//     memcpy(info.cdb, cdb, sizeof(info.cdb));
+//     int bytes_sent = send(s->simulate_one_port_socket, &info, sizeof(PhisonTesterOpInfo), 0);
+//     if (bytes_sent < 0)
+//     {
+//         printf("nvme phison model pci socket send fail\n");
+//         return 0;
+//     }
+
+//     int bytes_received = recv(s->simulate_one_port_socket, &result, sizeof(PhisonTesterOpResult), 0);
+
+//     if (bytes_received == 0)
+//     {
+//         // The client has closed the connection
+//         printf("nvme phison model pci socket model closed connection\n");
+//         close(s->simulate_one_port_socket);
+//         s->simulate_one_port_socket = -1;
+//         return 0;
+//     }
+//     else if (bytes_received < 0)
+//     {
+//         printf("nvme phison model pci socket recv fail\n");
+//         close(s->simulate_one_port_socket);
+//         s->simulate_one_port_socket = -1;
+//         return 0;
+//     }
+//     return result.data;
+//     // return 0;
+// }
 
 static void scsi_free_request(SCSIRequest *req)
 {
@@ -2084,6 +2148,7 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     int buflen;
 
     switch (req->cmd.buf[0]) {
+    case 0x6:
     case INQUIRY:
     case MODE_SENSE:
     case MODE_SENSE_10:
@@ -2127,6 +2192,22 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     outbuf = r->iov.iov_base;
     memset(outbuf, 0, r->buflen);
     switch (req->cmd.buf[0]) {
+case 0x6:
+        if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)) {
+            buflen = scsi_disk_emulate_phison_vendor(r, outbuf);
+            if (buflen < 0) {
+                printf("[emulate_command] vendor 0x06 CDB rejected, "
+                       "sub-opcode=0x%02X, vendor_f0_result=%d\n",
+                       r->req.cmd.buf[2], r->vendor_f0_result);
+                goto illegal_request;
+            }
+            break;
+        } else {
+            printf("[emulate_command] vendor 0x06 CDB received but "
+                   "one-port mode not enabled, rejecting\n");
+            goto illegal_request;
+        }
+        break;
     case TEST_UNIT_READY:
         assert(blk_is_available(s->qdev.conf.blk));
         break;
@@ -2821,28 +2902,6 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     SCSIRequest *req;
     const SCSIReqOps *ops;
     uint8_t command;
-    // printf("scsi_new_request CDB Received: ");
-    // for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
-    // {
-    //     printf("0x%02X ", buf[i]);
-    // }
-    // printf("\n");
-    if (buf[0] == 0x06 && buf[1] == 0xF0) 
-    {
-        printf("Vendor md received, forward to model code.\n");
-        for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
-        {
-            printf("0x%02X ", buf[i]);
-        }
-        printf("\n");
-        if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
-        {
-            send_cdb_to_phison_model_tester(s, buf);
-        }
-        
-    }
-    
-
 
     command = buf[0];
     ops = scsi_disk_reqops_dispatch[command];
@@ -2851,12 +2910,105 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     }
     req = scsi_req_alloc(ops, &s->qdev, tag, lun, hba_private);
 
+    if (buf[0] == 0x06 && buf[1] == 0xF0) {
+        SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
+
+        printf("Vendor md received, forward to model code.\n");
+        for (int i = 0; i < SCSI_CMD_BUF_SIZE; i++) {
+            printf("0x%02X ", buf[i]);
+        }
+        printf("\n");
+
+        r->vendor_f0_result = CHECK_CONDITION;
+
+        if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)) {
+            int sock_fd = s->simulate_one_port_socket;
+            PhisonTesterOpInfo op_info;
+            PhisonTesterOpResult op_result;
+            int send_ret, recv_ret;
+
+            memset(&op_info, 0, sizeof(op_info));
+            memcpy(op_info.cdb, buf, SCSI_CMD_BUF_SIZE);
+
+            send_ret = phison_model_socket_use(sock_fd, &op_info,
+                                                sizeof(op_info), true);
+            if (send_ret != 0) {
+                printf("[scsi_new_request] vendor 0xF0 CDB "
+                       "send to model failed\n");
+            }
+
+            recv_ret = phison_model_socket_use(sock_fd, &op_result,
+                                                sizeof(op_result), false);
+            if (recv_ret != 0) {
+                printf("[scsi_new_request] vendor 0xF0 CDB "
+                       "recv from model failed\n");
+            }
+
+            if (send_ret == 0 && recv_ret == 0) {
+                if (op_result.data == 0) {
+                    r->vendor_f0_result = GOOD;
+                } else {
+                    printf("[scsi_new_request] vendor 0xF0 CDB "
+                           "model returned data=0x%" PRIx64 "\n",
+                           op_result.data);
+                }
+            }
+        } else {
+            printf("[scsi_new_request] one-port mode not enabled, "
+                   "vendor 0xF0 CDB not forwarded\n");
+        }
+    }
+
     if (trace_event_get_state_backends(TRACE_SCSI_DISK_NEW_REQUEST)) {
         scsi_disk_new_request_dump(lun, tag, buf);
     }
 
     return req;
 }
+
+// static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
+//                                      uint8_t *buf, void *hba_private)
+// {
+//     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+//     SCSIRequest *req;
+//     const SCSIReqOps *ops;
+//     uint8_t command;
+//     // printf("scsi_new_request CDB Received: ");
+//     // for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+//     // {
+//     //     printf("0x%02X ", buf[i]);
+//     // }
+//     // printf("\n");
+//     if (buf[0] == 0x06 && buf[1] == 0xF0) 
+//     {
+//         printf("Vendor md received, forward to model code.\n");
+//         for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+//         {
+//             printf("0x%02X ", buf[i]);
+//         }
+//         printf("\n");
+//         if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
+//         {
+//             send_cdb_to_phison_model_tester(s, buf);
+//         }
+        
+//     }
+    
+
+
+//     command = buf[0];
+//     ops = scsi_disk_reqops_dispatch[command];
+//     if (!ops) {
+//         ops = &scsi_disk_emulate_reqops;
+//     }
+//     req = scsi_req_alloc(ops, &s->qdev, tag, lun, hba_private);
+
+//     if (trace_event_get_state_backends(TRACE_SCSI_DISK_NEW_REQUEST)) {
+//         scsi_disk_new_request_dump(lun, tag, buf);
+//     }
+
+//     return req;
+// }
 
 #ifdef __linux__
 static int get_device_type(SCSIDiskState *s)
