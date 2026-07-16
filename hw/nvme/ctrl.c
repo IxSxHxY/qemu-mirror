@@ -9995,12 +9995,12 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
         if (PHISON_MODEL_RECONNECT_ENABLED(n)) 
         {
             printf("RPC Reconnect Enabled!\n");
-            qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_read_handler, NULL, n);
+            qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_disconnect_handler, NULL, n);
         }
         else
         {
             printf("RPC Reconnect Disabled!\n");
-            qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_disconnect_handler, NULL, n);
+            qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_read_handler, NULL, n);
 
         }
 
@@ -10242,9 +10242,10 @@ static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
  
     int sock_fd = n->phison_model_pci_client_socket;
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) != 0) {
-        printf("[PCI WRITE] Socket error, triggering reconnect\n");
+        
         if (PHISON_MODEL_RECONNECT_ENABLED(n))
         {
+            printf("[PCI WRITE] Socket error, triggering reconnect\n");
             phison_on_disconnect(n);
         }
         return;
