@@ -570,6 +570,7 @@ typedef struct NvmeParams {
     uint16_t phison_model_nvme_port;
     uint16_t phison_model_pci_port;
     uint16_t phison_model_rpc_port;
+    bool reconnect;
     bool     msix_exclusive_bar;
 
     struct {

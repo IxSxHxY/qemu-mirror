@@ -243,6 +243,7 @@
 #define PHISON_MODEL_RPC_MODE_ENABLED(n)  ((n->params.phison_model_rpc_port > 0) && (n->params.phison_model_ip))
 #define PHISON_MODEL_NVME_MODE_ENABLED(n)  ((n->params.phison_model_nvme_port > 0) && (n->params.phison_model_ip))
 #define PHISON_MODEL_PCI_MODE_ENABLED(n)  ((n->params.phison_model_pci_port > 0) && (n->params.phison_model_ip))
+#define PHISON_MODEL_RECONNECT_ENABLED(n)  ((n->params.reconnect == true))
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
@@ -8958,6 +8959,10 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
                                              qemu_name, stuck_seconds);
             } else {        
                 printf("[NVMe] READ response failed (Addr:0x%lX)\n", addr);
+                if (PHISON_MODEL_RECONNECT_ENABLED(n))
+                {
+                    phison_on_disconnect(n);
+                }
             }
         }
     }
@@ -8988,7 +8993,10 @@ static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t dat
     int sock_fd = n->phison_model_nvme_client_socket;
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) != 0) {
         printf("[MMIO WRITE] Socket error, triggering reconnect\n");
-        phison_on_disconnect(n);
+        if (PHISON_MODEL_RECONNECT_ENABLED(n))
+        {
+            phison_on_disconnect(n);
+        }
         return;
     }
  
@@ -9908,7 +9916,12 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
         // qemu_set_fd_handler(n->phison_model_nvme_client_socket, phison_socket_read_handler, NULL, n);
-        qemu_set_fd_handler(n->phison_model_nvme_client_socket, phison_nvme_disconnect_handler, NULL, n);
+        if (PHISON_MODEL_RECONNECT_ENABLED(n))
+        {
+            printf("NVMe Reconnect Enabled!\n");
+            qemu_set_fd_handler(n->phison_model_nvme_client_socket, phison_nvme_disconnect_handler, NULL, n);
+        }
+        
     }
     
     n->phison_model_pci_client_socket = -1;
@@ -9937,7 +9950,16 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             error_setg(errp, "nvme phison model pci socket connect fail.");
             return;
         }
-        qemu_set_fd_handler(n->phison_model_pci_client_socket, phison_pci_disconnect_handler, NULL, n);
+        if (PHISON_MODEL_RECONNECT_ENABLED(n))
+        {
+            printf("PCI Reconnect Enabled!\n");
+            qemu_set_fd_handler(n->phison_model_pci_client_socket, phison_pci_disconnect_handler, NULL, n);
+        }
+        else
+        {
+            printf("PCI Reconnect Disabled!\n");
+        }
+        
         pci_dev->config_read = nvme_pci_read_config_phison_model;
         pci_dev->config_write = nvme_pci_write_config_phison_model;
     }
@@ -9970,7 +9992,17 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             return;
         }
         // 告訴 QEMU 的 Main Loop：「當這個 RPC Socket 有資料可以讀的時候，請呼叫 phison_rpc_read_handler」
-        qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_disconnect_handler, NULL, n);
+        if (PHISON_MODEL_RECONNECT_ENABLED(n)) 
+        {
+            printf("RPC Reconnect Enabled!\n");
+            qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_read_handler, NULL, n);
+        }
+        else
+        {
+            printf("RPC Reconnect Disabled!\n");
+            qemu_set_fd_handler(n->phison_model_rpc_client_socket, phison_rpc_disconnect_handler, NULL, n);
+
+        }
 
         printf("[nvme_init] Registered RPC read handler for socket %d\n", n->phison_model_rpc_client_socket);
 
@@ -10091,6 +10123,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("phison_model_nvme_port", NvmeCtrl, params.phison_model_nvme_port, 0),
     DEFINE_PROP_UINT16("phison_model_pci_port", NvmeCtrl, params.phison_model_pci_port, 0),
     DEFINE_PROP_UINT16("phison_model_rpc_port", NvmeCtrl, params.phison_model_rpc_port, 0),
+
+    DEFINE_PROP_BOOL("reconnect", NvmeCtrl, params.reconnect, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -10209,7 +10243,10 @@ static void nvme_pci_write_config_phison_model(PCIDevice *dev, uint32_t address,
     int sock_fd = n->phison_model_pci_client_socket;
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) != 0) {
         printf("[PCI WRITE] Socket error, triggering reconnect\n");
-        phison_on_disconnect(n);
+        if (PHISON_MODEL_RECONNECT_ENABLED(n))
+        {
+            phison_on_disconnect(n);
+        }
         return;
     }
  
@@ -10256,6 +10293,10 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
                                              qemu_name, stuck_seconds);
             } else {
                 printf("[PCI] Model READ response failed (Addr:0x%X)\n", address);
+                if (PHISON_MODEL_RECONNECT_ENABLED(n))
+                {
+                    phison_on_disconnect(n);
+                }
             }
         }
     }

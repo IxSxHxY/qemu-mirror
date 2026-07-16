@@ -63,6 +63,7 @@
 #define MAX_SERIAL_LEN_FOR_DEVID    20
 
 #define PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)  ((s->simulate_one_port_port > 0) && (s->simulate_one_port_ip))
+#define PHISON_MODEL_TESTER_RECONNECT_ENABLED(s)  ((s->reconnect == true))
 
 
 OBJECT_DECLARE_TYPE(SCSIDiskState, SCSIDiskClass, SCSI_DISK_BASE)
@@ -143,6 +144,7 @@ struct SCSIDiskState {
     PhisonConnState  simulate_one_port_conn_state;
     QEMUTimer       *simulate_one_port_reconnect_timer;
     int              simulate_one_port_reconnect_fd;   /* in-progress connect fd */
+    bool              reconnect;   /* in-progress connect fd */
 };
 
 // ============================================================
@@ -3004,7 +3006,15 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
             error_setg(errp, "nvme phison model socket connect fail.");
             return;
         }
-        qemu_set_fd_handler(s->simulate_one_port_socket, simulate_one_port_disconnect_handler, NULL, s);
+        if (PHISON_MODEL_TESTER_RECONNECT_ENABLED(s))
+        {
+            printf("Tester Reconnect Enabled!\n");
+            qemu_set_fd_handler(s->simulate_one_port_socket, simulate_one_port_disconnect_handler, NULL, s);
+        }
+        else 
+        {
+            printf("Tester Reconnect Disabled!\n");
+        }
     }
 
     s->simulate_one_port_reconnect_fd    = -1;
@@ -3726,6 +3736,7 @@ static Property scsi_hd_properties[] = {
     DEFINE_BLOCK_CHS_PROPERTIES(SCSIDiskState, qdev.conf),
     DEFINE_PROP_STRING("simulate_one_port_ip", SCSIDiskState, simulate_one_port_ip),
     DEFINE_PROP_UINT16("simulate_one_port_port", SCSIDiskState, simulate_one_port_port, 0),
+    DEFINE_PROP_BOOL("reconnect", SCSIDiskState, reconnect, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
