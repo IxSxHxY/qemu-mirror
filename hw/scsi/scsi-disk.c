@@ -171,12 +171,6 @@ static int scsi_disk_emulate_phison_vendor(SCSIDiskReq *r, uint8_t *outbuf)
     printf("[emulate_phison_vendor] sub-opcode=0x%02X, "
            "vendor_f0_result=%d\n", cdb[2], r->vendor_f0_result);
 
-    if (cdb[1] != 0xF0) {
-        printf("[emulate_phison_vendor] cdb[1]=0x%02X != 0xF0, "
-               "not a phison vendor CDB\n", cdb[1]);
-        return -1;
-    }
-
     /* recognized sub-opcode */
     if (r->vendor_f0_result == GOOD) 
     {
@@ -2861,7 +2855,7 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     }
     req = scsi_req_alloc(ops, &s->qdev, tag, lun, hba_private);
 
-    if (buf[0] == 0x06 && buf[1] == 0xF0) {
+    if (buf[0] == 0x06) {
         SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
 
         printf("Vendor md received, forward to model code.\n");
