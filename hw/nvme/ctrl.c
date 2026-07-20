@@ -7714,6 +7714,8 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
 
 // Obsoleted End
 
+// 支援 Timeout 的 phison_model_socket_use
+// 成功回傳 0，一般錯誤回傳 -1，超時或斷線回傳 -2
 static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is_send) 
 {
     if (sock_fd < 0 || !data || size == 0) {
@@ -7730,23 +7732,46 @@ static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is
     } 
     else {
         // --- 執行接收邏輯 ---
-        // 使用 MSG_WAITALL 確保收齊 caller 指定的 size 長度
+        
+        // 1. 設定超時時間（例如：設定為 10 秒，可根據需求調整秒數或微秒）
+        struct timeval timeout;
+        timeout.tv_sec = 10;  // 10 秒
+        timeout.tv_usec = 0;
+
+        // 設定 Socket 接收超時屬性
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) < 0) {
+            printf("[Socket %d] setsockopt SO_RCVTIMEO 失敗\n", sock_fd);
+            return -1;
+        }
+
+        // 使用 MSG_WAITALL 確保收齊，此時若超過 2 秒沒收完會被中斷並回傳錯誤
         ssize_t received = recv(sock_fd, data, size, MSG_WAITALL);
 
         if (received < (ssize_t)size) {
             if (received == 0) {
                 printf("[Socket %d] Connection closed by model\n", sock_fd);
-            } else {
-                printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes\n", 
-                        sock_fd, received, size);
+                return -2; // 斷線回傳 -2
+            } 
+            
+            // 檢查是否是因為超時引發的錯誤
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                printf("[Socket %d] Recv TIMEOUT triggered (%ld 秒)\n", sock_fd, timeout.tv_sec);
+                return -2; // 超時回傳 -2
             }
+
+            printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes (errno: %d)\n", 
+                    sock_fd, received, size, errno);
             return -1;
         }
+
+        // 2. 接收成功後，建議把超時重設回 0（代表無限期阻塞），避免影響 QEMU 其他潛在的 Socket 操作
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 0;
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     }
 
     return 0;
 }
-//
 
 static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -9147,8 +9172,14 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
     // 請求讀取
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
         PhisonMMIoOpResult result;
-        if (phison_model_socket_use(sock_fd, &result, sizeof(result), false) == 0) {
+        int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
+        
+        if (ret == 0) {
             final_val = (uint32_t)result.data;
+        } else if (ret == -2) {
+            printf("[Socket] Model READ TIMEOUT or Disconnected (Addr:0x%X), using local fallback\n", address);
+            error_printf("Socket timeout error\n");
+            exit(1);
         } else {
             printf("[Socket] Model READ response failed (Addr:0x%X)\n", address);
         }
