@@ -9909,7 +9909,7 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
     
     // 預讀 QEMU 本地數值作為 Fallback
     uint32_t local_val = nvme_pci_read_config(dev, address, len);
-    uint32_t final_val = local_val;
+    uint32_t final_val = 0;
 
     PhisonMMIoOpInfo info = {
         .op     = PHISON_MODEL_MMIO_OP_READ,
@@ -9921,16 +9921,20 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
     // 請求讀取
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
         PhisonMMIoOpResult result;
-        int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
+        while (true)
+        {
+            int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
         
-        if (ret == 0) {
-            final_val = (uint32_t)result.data;
-        } else if (ret == -2) {
-            printf("[Socket] Model READ TIMEOUT or Disconnected (Addr:0x%X), using local fallback\n", address);
-            error_printf("Socket timeout error\n");
-            exit(1);
-        } else {
-            printf("[Socket] Model READ response failed (Addr:0x%X)\n", address);
+            if (ret == 0) {
+                final_val = (uint32_t)result.data;
+                break;
+            } else if (ret == -2) {
+                // printf("[Socket] Model READ TIMEOUT or Disconnected (Addr:0x%X), using local fallback\n", address);
+                error_printf("Socket timeout error (Model VM IP: %s)\n", n->params.phison_model_ip);
+                // exit(1);
+            } else {
+                printf("[Socket] Model READ response failed (Addr:0x%X)\n", address);
+            }
         }
     }
 
