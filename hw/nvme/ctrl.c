@@ -8478,6 +8478,37 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
         nvme_process_db(n, addr, data);
     }
 }
+#include "chardev/char.h"
+static int get_vmid_from_qmp_chardev(void)
+{
+    /* 1. 透過 ID "qmp" 尋找對應的 Chardev 物件 */
+    Chardev *chr = qemu_chr_find("qmp");
+    if (!chr) {
+        qemu_log("Failed to find 'qmp' chardev!\n");
+        return -1;
+    }
+
+    /* 2. 檢查其 label/filename (通常包含 path=/var/run/qemu-server/101.qmp) */
+    const char *filename = chr->filename;
+    if (!filename) {
+        return -1;
+    }
+
+    /* 
+     * filename 的格式通常為: "socket:path=/var/run/qemu-server/101.qmp,server=on..."
+     * 我們尋找 "/qemu-server/" 這個特徵字串
+     */
+    const char *p = strstr(filename, "/qemu-server/");
+    if (p) {
+        p += strlen("/qemu-server/"); /* 指向 "101.qmp..." */
+        int vmid = atoi(p);           /* atoi 會自動在遇到非數字 (即 .qmp) 時停止 */
+        if (vmid > 0) {
+            return vmid;
+        }
+    }
+
+    return -1;
+}
 
 static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned size)
 {
@@ -8494,17 +8525,25 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
         .offset = (uint64_t)addr,
         .data   = 0
     };
+    int vmid = get_vmid_from_qmp_chardev();
 
     // 1. 發送讀取請求
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
-        PhisonMMIoOpResult resp = {0};
-        // 2. 接收 Model 回傳的結果
-        if (phison_model_socket_use(sock_fd, &resp, sizeof(resp), false) == 0) {
-            final_val = resp.data;
-        } else {
-            // 如果失敗，socket_use 內部會印出錯誤，這裡做標記即可
-            final_val = 0;
-            printf("[MMIO 18299] Read failed, using local value\n");
+        PhisonMMIoOpResult result;
+        while (true)
+        {
+            int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
+        
+            if (ret == 0) {
+                final_val = (uint32_t)result.data;
+                break;
+            } else if (ret == -2) {
+                // printf("[Socket] Model READ TIMEOUT or Disconnected (Addr:0x%X), using local fallback\n", address);
+                error_printf("[NVMe] Socket timeout error (Model VM IP: %s | Pattern VM Name: %s | Pattern VMID: %d)\n", n->params.phison_model_ip, qemu_name, vmid);
+                // exit(1);
+            } else {
+                printf("[NVMe] READ response failed (Addr:0x%lX)\n", addr);
+            }
         }
     }
 
@@ -9917,6 +9956,8 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
         .offset = (uint64_t)address,
         .data   = 0
     };
+    int vmid = get_vmid_from_qmp_chardev();
+
 
     // 請求讀取
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
@@ -9930,10 +9971,10 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
                 break;
             } else if (ret == -2) {
                 // printf("[Socket] Model READ TIMEOUT or Disconnected (Addr:0x%X), using local fallback\n", address);
-                error_printf("Socket timeout error (Model VM IP: %s)\n", n->params.phison_model_ip);
+                error_printf("[NVMe] Socket timeout error (Model VM IP: %s | Pattern VM Name: %s | Pattern VMID: %d)\n", n->params.phison_model_ip, qemu_name, vmid);
                 // exit(1);
             } else {
-                printf("[Socket] Model READ response failed (Addr:0x%X)\n", address);
+                printf("[PCI] Model READ response failed (Addr:0x%X)\n", address);
             }
         }
     }
