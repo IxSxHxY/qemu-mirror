@@ -145,6 +145,69 @@ typedef struct QEMU_PACKED PhisonTesterOpResult
     uint64_t data;
 } PhisonTesterOpResult;
 
+
+#include "chardev/char.h"
+static int get_vmid_from_qmp_chardev(void)
+{
+    /* 1. 透過 ID "qmp" 尋找對應的 Chardev 物件 */
+    Chardev *chr = qemu_chr_find("qmp");
+    if (!chr) {
+        qemu_log("Failed to find 'qmp' chardev!\n");
+        return -1;
+    }
+
+    /* 2. 檢查其 label/filename (通常包含 path=/var/run/qemu-server/101.qmp) */
+    const char *filename = chr->filename;
+    if (!filename) {
+        return -1;
+    }
+
+    /* 
+     * filename 的格式通常為: "socket:path=/var/run/qemu-server/101.qmp,server=on..."
+     * 我們尋找 "/qemu-server/" 這個特徵字串
+     */
+    const char *p = strstr(filename, "/qemu-server/");
+    if (p) {
+        p += strlen("/qemu-server/"); /* 指向 "101.qmp..." */
+        int vmid = atoi(p);           /* atoi 會自動在遇到非數字 (即 .qmp) 時停止 */
+        if (vmid > 0) {
+            return vmid;
+        }
+    }
+
+    return -1;
+}
+
+static void phison_socket_update_status(const char *desc, int vmid,
+                                         const char *model_ip,
+                                         const char *vm_name,
+                                         int stuck_seconds)
+{
+    char path[64];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "/tmp/VM%d_socket_status", vmid);
+    f = fopen(path, "w");
+    if (f) {
+        if (stuck_seconds == 0) {
+            fprintf(f, "[%s] socket ok\n", desc);
+        } else {
+            fprintf(f, "[%s] socket stuck for %d seconds\n", desc, stuck_seconds);
+        }
+        fclose(f);
+    }
+
+    if (stuck_seconds > 0 && stuck_seconds % 10 == 0) {
+        error_report("[QEMU NVME Agent][%s] Socket stuck for %d seconds "
+                      "(Model VM IP: %s | Pattern VM Name: %s | Pattern VMID: %d)",
+                      desc, stuck_seconds,
+                      model_ip ? model_ip : "N/A",
+                      vm_name, vmid);
+    }
+}
+
+// 支援 Timeout 的 phison_model_socket_use
+// 成功回傳 0，一般錯誤回傳 -1，超時回傳 -2
 static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is_send) 
 {
     if (sock_fd < 0 || !data || size == 0) {
@@ -161,23 +224,46 @@ static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is
     } 
     else {
         // --- 執行接收邏輯 ---
-        // 使用 MSG_WAITALL 確保收齊 caller 指定的 size 長度
+        
+        // 1. 設定超時時間（例如：設定為 10 秒，可根據需求調整秒數或微秒）
+        struct timeval timeout;
+        timeout.tv_sec = 1;  // 10 秒
+        timeout.tv_usec = 0;
+
+        // 設定 Socket 接收超時屬性
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) < 0) {
+            printf("[Socket %d] setsockopt SO_RCVTIMEO 失敗\n", sock_fd);
+            return -1;
+        }
+
+        // 使用 MSG_WAITALL 確保收齊，此時若超過 2 秒沒收完會被中斷並回傳錯誤
         ssize_t received = recv(sock_fd, data, size, MSG_WAITALL);
 
         if (received < (ssize_t)size) {
             if (received == 0) {
                 printf("[Socket %d] Connection closed by model\n", sock_fd);
-            } else {
-                printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes\n", 
-                        sock_fd, received, size);
+                return -1; // 斷線回傳 -1
+            } 
+            
+            // 檢查是否是因為超時引發的錯誤
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                printf("[Socket %d] Recv TIMEOUT triggered (%ld 秒)\n", sock_fd, timeout.tv_sec);
+                return -2; // 超時回傳 -2
             }
+
+            printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes (errno: %d)\n", 
+                    sock_fd, received, size, errno);
             return -1;
         }
+
+        // 2. 接收成功後，建議把超時重設回 0（代表無限期阻塞），避免影響 QEMU 其他潛在的 Socket 操作
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 0;
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     }
 
     return 0;
 }
-
 static int scsi_disk_emulate_phison_vendor(SCSIDiskReq *r, uint8_t *outbuf)
 {
     uint8_t *cdb = r->req.cmd.buf;
@@ -2920,6 +3006,8 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
             PhisonTesterOpInfo op_info;
             PhisonTesterOpResult op_result;
             int send_ret, recv_ret;
+            int vmid = get_vmid_from_qmp_chardev();
+            int stuck_seconds = 0;
 
             memset(&op_info, 0, sizeof(op_info));
             memcpy(op_info.cdb, buf, SCSI_CMD_BUF_SIZE);
@@ -2931,11 +3019,24 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
                        "send to model failed\n");
             }
 
-            recv_ret = phison_model_socket_use(sock_fd, &op_result,
-                                                sizeof(op_result), false);
-            if (recv_ret != 0) {
-                printf("[scsi_new_request] vendor 0xF0 CDB "
-                       "recv from model failed\n");
+            recv_ret = -1;
+            if (send_ret == 0) {
+                while (true) {
+                    recv_ret = phison_model_socket_use(sock_fd, &op_result,
+                                                        sizeof(op_result), false);
+                    if (recv_ret == 0) {
+                        phison_socket_update_status("Tester", vmid, s->simulate_one_port_ip, qemu_name, 0);
+                        break;
+                    } else if (recv_ret == -2) {
+                        stuck_seconds++;
+                        phison_socket_update_status("Tester", vmid, s->simulate_one_port_ip, qemu_name,
+                                                     stuck_seconds);
+                    } else {
+                        printf("[scsi_new_request] vendor 0xF0 CDB "
+                               "recv from model failed\n");
+                        break;
+                    }
+                }
             }
 
             if (send_ret == 0 && recv_ret == 0) {
