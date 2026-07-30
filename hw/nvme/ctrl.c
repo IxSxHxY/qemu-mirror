@@ -8929,7 +8929,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
     if (n->phison_conn_state != PHISON_CONN_CONNECTED) {
         printf("[MMIO READ] Not connected (state=%d), returning local\n",
                n->phison_conn_state);
-        return local_val;
+        return 0;
     }
  
     PhisonMMIoOpInfo info = {
