@@ -164,10 +164,10 @@ static void simulate_one_port_reconnect_fail(SCSIDiskState *s, int fd)
         close(s->simulate_one_port_socket);
         s->simulate_one_port_socket = -1;
     }
-    printf("[OnePort] Reconnect failed, retry in 5s\n");
+    printf("[OnePort] Reconnect failed, retry in 1s\n");
     s->simulate_one_port_conn_state = PHISON_CONN_DISCONNECTED;
     timer_mod(s->simulate_one_port_reconnect_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 5000);
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
 }
 
 /* 你原本的，職責：清理 socket + 觸發 reconnect。維持不變 */

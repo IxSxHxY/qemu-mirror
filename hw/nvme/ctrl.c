@@ -8758,10 +8758,10 @@ static void phison_reconnect_fail(NvmeCtrl *n, int fd)
         n->phison_model_rpc_client_socket = -1;
     }
 
-    printf("[Reconnect] Failed, retry in 5s\n");
+    printf("[Reconnect] Failed, retry in 1s\n");
     n->phison_conn_state = PHISON_CONN_DISCONNECTED;
     timer_mod(n->phison_reconnect_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 5000);
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
 }
 
 // --- Step 3: RPC 連上 ---
