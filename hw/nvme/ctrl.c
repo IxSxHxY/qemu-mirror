@@ -8545,6 +8545,26 @@ static void phison_socket_update_status(const char *desc, int vmid,
 // ============================================================
 // Callback chain: NVMe → PCI → RPC
 // ============================================================
+// ============================================================
+// TCP keepalive + user timeout：讓 sudden death 能被內核偵測到
+// ============================================================
+static void phison_set_socket_keepalive(int fd)
+{
+    int enable = 1;
+    int idle   = 3;   // 3 秒沒有流量開始探測
+    int intvl  = 2;   // 探測間隔 2 秒
+    int cnt    = 3;   // 連續 3 次沒回應才判死
+
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+
+    // 對端完全沒回 ACK 的話，5 秒內強制判定連線失敗
+    unsigned int user_timeout_ms = 5000;
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
+}
+
 static void phison_reconnect_start(NvmeCtrl *n);
 
 static void phison_rpc_read_handler(void *opaque)
@@ -8785,7 +8805,7 @@ static void phison_on_rpc_connected(void *opaque)
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
-
+    phison_set_socket_keepalive(fd);
     n->phison_model_rpc_client_socket = fd;
 
     // 掛上 RPC disconnect handler（含資料處理）
@@ -8817,7 +8837,7 @@ static void phison_on_pci_connected(void *opaque)
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
-
+    phison_set_socket_keepalive(fd);
     n->phison_model_pci_client_socket = fd;
     pci_dev->config_read  = nvme_pci_read_config_phison_model;
     pci_dev->config_write = nvme_pci_write_config_phison_model;
@@ -8858,7 +8878,7 @@ static void phison_on_nvme_connected(void *opaque)
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
-
+    phison_set_socket_keepalive(fd);
     n->phison_model_nvme_client_socket = fd;
 
     // 掛上 NVMe disconnect handler
@@ -9915,6 +9935,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             error_setg(errp, "nvme phison model socket connect fail.");
             return;
         }
+        phison_set_socket_keepalive(n->phison_model_nvme_client_socket);
         // qemu_set_fd_handler(n->phison_model_nvme_client_socket, phison_socket_read_handler, NULL, n);
         if (PHISON_MODEL_RECONNECT_ENABLED(n))
         {
@@ -9950,6 +9971,8 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             error_setg(errp, "nvme phison model pci socket connect fail.");
             return;
         }
+
+        phison_set_socket_keepalive(n->phison_model_pci_client_socket);
         if (PHISON_MODEL_RECONNECT_ENABLED(n))
         {
             printf("PCI Reconnect Enabled!\n");
@@ -9991,6 +10014,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
             error_setg(errp, "RPC phison model socket connect fail.");
             return;
         }
+        phison_set_socket_keepalive(n->phison_model_rpc_client_socket);
         // 告訴 QEMU 的 Main Loop：「當這個 RPC Socket 有資料可以讀的時候，請呼叫 phison_rpc_read_handler」
         if (PHISON_MODEL_RECONNECT_ENABLED(n)) 
         {
