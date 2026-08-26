@@ -43,9 +43,16 @@
 #include "qemu/cutils.h"
 #include "trace.h"
 #include "qom/object.h"
+#include "qemu/thread.h"
+#include "sysemu/hostmem.h"
+#include "exec/memory.h"
 
 #ifdef __linux
 #include <scsi/sg.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #define SCSI_WRITE_SAME_MAX         (512 * KiB)
@@ -62,8 +69,13 @@
 #define MAX_SERIAL_LEN              36
 #define MAX_SERIAL_LEN_FOR_DEVID    20
 
-#define PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)  ((s->simulate_one_port_port > 0) && (s->simulate_one_port_ip))
+#define PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)  ((s->simulate_one_port_port > 0) && (s->phison_source != NULL))
+#define PHISON_MODEL_I3C_MODE_ENABLED(s)  ((s->simulate_i3c_port > 0) && (s->phison_source != NULL))
+#define PHISON_I3C_SG_XFER_SIZE 512
+#define PHISON_I3C_SCAN_RSP_LEN 528
 
+static const unsigned char phison_i3c_scan_response[] =
+    "\x12\x01\x00\x02\x00\x00\x00\x40\x00\x51\xfe\x13\x00\x01\x01\x02\x03\x01\x04\x03\x09\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x03\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x1a\x03\x55\x00\x46\x00\x53\x00\x5f\x00\x54\x00\x65\x00\x73\x00\x74\x00\x65\x00\x72\x00\x56\x00\x36\x00\x1a\x03\x46\x00\x46\x00\x39\x00\x41\x00\x32\x00\x39\x00\x46\x00\x46\x00\x46\x00\x46\x00\x30\x00\x30\x00\x1c\x03\x30\x00\x35\x00\x20\x00\x55\x00\x53\x00\x42\x00\x20\x00\x52\x00\x2f\x00\x57\x00\x20\x00\x56\x00\x02\x04\x00\x19\x05\x17\xff\x7f\x49\x33\x43\x5f\x54\x65\x73\x74\x65\x72\x20\x20\x20\x20\x20\x20\xff\x00\x00\x00\x20\x20\x20\x20\x20\x20\x20\x20\x32\x2e\x30\x34\x00\x00\x00\x00\x00\x00\x00\x00\x50\x68\x49\x73\x4f\x6e\x00\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x32\x30\x32\x35\x20\x4d\x61\x79\x20\x32\x33\x00\x00\x00\x00\x00\x31\x38\x3a\x31\x31\x3a\x31\x37\x00\x00\x00\x00\x00\x00\x00\x00\x55\x53\x42\x00\x2e\x30\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x9d\x23\x55\xeb\xa7\x6b\x9a\x54\x9d\xc9\x1b\x69\xd1\x3e\xdc\x5b\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x28\x10\xbb\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xbc\x49\x30\x68\x55\x1f\x96\x0a\x01\x08\x00\x14\x00\x00\x00\x00\x03\x24\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
 OBJECT_DECLARE_TYPE(SCSIDiskState, SCSIDiskClass, SCSI_DISK_BASE)
 
@@ -93,6 +105,9 @@ typedef struct SCSIDiskReq {
     struct iovec iov;
     QEMUIOVector qiov;
     BlockAcctCookie acct;
+
+    bool is_i3c_oob;
+    uint8_t i3c_cdb[16];
 } SCSIDiskReq;
 
 #define SCSI_DISK_F_REMOVABLE             0
@@ -127,9 +142,18 @@ struct SCSIDiskState {
      */
     uint16_t rotation_rate;
     bool migrate_emulated_scsi_request;
-    char *simulate_one_port_ip;
+    
+    DeviceState *phison_source;
     uint16_t simulate_one_port_port;
     int simulate_one_port_socket;
+    /* I3C */
+    uint16_t simulate_i3c_port;
+    int simulate_i3c_port_socket;
+    HostMemoryBackend *simulate_i3c_memdev;
+    uint64_t simulate_i3c_shm_offset;
+    uint64_t simulate_i3c_shm_size;
+    void *simulate_i3c_shm_ptr;
+    QemuMutex simulate_i3c_mutex;
 };
 
 typedef struct QEMU_PACKED PhisonTesterOpInfo
@@ -137,11 +161,265 @@ typedef struct QEMU_PACKED PhisonTesterOpInfo
     uint8_t cdb[16];
 } PhisonTesterOpInfo;
 
+#define PHISON_I3C_DIR_NONE        0
+#define PHISON_I3C_DIR_TO_MODEL    1
+#define PHISON_I3C_DIR_FROM_MODEL  2
+
+typedef struct QEMU_PACKED PhisonI3COpInfo
+{
+    uint8_t  cdb[16];
+    uint64_t shm_offset;
+    uint32_t xfer_len;
+} PhisonI3COpInfo;
+
+static int send_cdb_to_i3c_phison_model_tester(
+    SCSIDiskState *s,
+    const uint8_t *cdb,
+    uint64_t shm_offset,
+    uint32_t length,
+    uint8_t direction);
+
+typedef struct QEMU_PACKED PhisonI3COpResult
+{
+    uint64_t result;
+    uint64_t data;
+} PhisonI3COpResult;
+
 typedef struct QEMU_PACKED PhisonTesterOpResult
 {
     uint64_t result;
     uint64_t data;
 } PhisonTesterOpResult;
+
+static void scsi_i3c_write_data(SCSIRequest *req)
+{
+    SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, req->dev);
+    /*
+     * First call:
+     * request guest data from virtio-scsi.
+     */
+    if (r->iov.iov_len)
+    {
+        int buflen = r->iov.iov_len;
+        r->iov.iov_len = 0;
+        scsi_req_data(req, buflen);
+        return;
+    }
+
+    /*
+     * Second call:
+     * guest payload is now in iov_base.
+     */
+    uint32_t xfer_len = r->buflen;
+    if (xfer_len > s->simulate_i3c_shm_size)
+    {
+        scsi_req_complete(req,CHECK_CONDITION);
+        return;
+    }
+    qemu_mutex_lock(&s->simulate_i3c_mutex);
+    memcpy(s->simulate_i3c_shm_ptr,r->iov.iov_base,xfer_len);
+    int rc = send_cdb_to_i3c_phison_model_tester(s,r->i3c_cdb,s->simulate_i3c_shm_offset,xfer_len);
+    qemu_mutex_unlock(&s->simulate_i3c_mutex);
+    scsi_req_complete(req,rc == 0 ? GOOD : CHECK_CONDITION);
+}
+
+static int32_t scsi_i3c_send_command(SCSIRequest *req,uint8_t *buf)
+{
+    SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, req->dev);
+    uint32_t xfer_len = req->cmd.xfer;
+    (void)buf;
+
+    /*
+     * Tester scan is still handled locally.
+     */
+    if (r->i3c_cdb[0] == 0x06 && r->i3c_cdb[1] == 0x05)
+    {
+        r->buflen = PHISON_I3C_SCAN_RSP_LEN;
+        if (!r->iov.iov_base)
+        {
+            r->iov.iov_base = blk_blockalign(s->qdev.conf.blk,r->buflen);
+        }
+        memcpy(r->iov.iov_base,phison_i3c_scan_response,PHISON_I3C_SCAN_RSP_LEN);
+        r->iov.iov_len = PHISON_I3C_SCAN_RSP_LEN;
+        return PHISON_I3C_SCAN_RSP_LEN;
+    }
+
+    /*
+     * Safety check only.
+     */
+    if (xfer_len > s->simulate_i3c_shm_size)
+    {
+        printf(
+            "[I3C] Transfer too large: %u\n",
+            xfer_len
+        );
+        scsi_req_complete(req,CHECK_CONDITION);
+        return 0;
+    }
+
+    /*
+     * ============================================================
+     * NO DATA
+     * ============================================================
+     */
+    if (req->cmd.mode == SCSI_XFER_NONE)
+    {
+        qemu_mutex_lock(&s->simulate_i3c_mutex);
+        int rc = send_cdb_to_i3c_phison_model_tester(s,r->i3c_cdb,0,0);
+        qemu_mutex_unlock(&s->simulate_i3c_mutex);
+        scsi_req_complete(req,rc == 0 ? GOOD : CHECK_CONDITION);
+        return 0;
+    }
+
+    r->buflen = xfer_len;
+    if (!r->iov.iov_base)
+    {
+        r->iov.iov_base = blk_blockalign(s->qdev.conf.blk,r->buflen);
+    }
+    memset(r->iov.iov_base,0,r->buflen);
+
+    /*
+     * ============================================================
+     * Guest -> Tester
+     * ============================================================
+     */
+    if (req->cmd.mode == SCSI_XFER_TO_DEV)
+    {
+        /*
+         * Ask virtio-scsi to give us the guest's
+         * data-out buffer.
+         */
+        r->iov.iov_len = xfer_len;
+        return -(int32_t)xfer_len;
+    }
+
+    /*
+     * ============================================================
+     * Tester -> Guest
+     * ============================================================
+     */
+    if (req->cmd.mode == SCSI_XFER_FROM_DEV)
+    {
+        qemu_mutex_lock(&s->simulate_i3c_mutex);
+        /*
+         * Clear entire SG_IO transfer area first.
+         * Model may only write the meaningful bytes.
+         */
+        memset(s->simulate_i3c_shm_ptr,0,xfer_len);
+        int rc = send_cdb_to_i3c_phison_model_tester(s,r->i3c_cdb,s->simulate_i3c_shm_offset,xfer_len);
+        if (rc == 0)
+        {
+            memcpy(r->iov.iov_base,s->simulate_i3c_shm_ptr,xfer_len);
+        }
+        qemu_mutex_unlock(&s->simulate_i3c_mutex);
+        if (rc != 0)
+        {
+            scsi_req_complete(req,CHECK_CONDITION);
+            return 0;
+        }
+        r->iov.iov_len = xfer_len;
+        return xfer_len;
+    }
+
+    printf("[I3C] Unsupported SCSI transfer mode %d\n",req->cmd.mode);
+    scsi_req_complete(req,CHECK_CONDITION);
+    return 0;
+}
+
+static int scsi_hd_parse_cdb(SCSIDevice *d, SCSICommand *cmd, uint8_t *buf, size_t buf_len, void *hba_private)
+{
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+    if (PHISON_MODEL_I3C_MODE_ENABLED(s) && buf_len >= 16 && buf[0] == 0x06 && buf[1] == 0x05)
+    {
+        memset(cmd, 0, sizeof(*cmd));
+        memcpy(cmd->buf, buf, MIN(buf_len, (size_t)16));
+        cmd->len  = 16;
+        cmd->xfer = PHISON_I3C_SCAN_RSP_LEN;
+        cmd->mode = SCSI_XFER_FROM_DEV;
+        return 0;
+    }
+    if (PHISON_MODEL_I3C_MODE_ENABLED(s) && buf_len >= 16 && buf[0] == 0x06 && buf[1] == 0xF0 && buf[2] == 0xE0)
+    {
+        return scsi_bus_parse_cdb(
+            &s->qdev,
+            cmd,
+            buf,
+            buf_len,
+            hba_private
+        );
+    }
+
+    return scsi_req_parse_cdb(d, cmd, buf, buf_len);
+}
+
+static bool i3c_map_shared_memory(SCSIDiskState *s, Error **errp)
+{
+    MemoryRegion *mr;
+    uint64_t backend_size;
+    uint8_t *base;
+
+    if (!s->simulate_i3c_memdev)
+    {
+        error_setg(errp, "I3C memory backend is not configured");
+        return false;
+    }
+
+    if (s->simulate_i3c_shm_size == 0)
+    {
+        error_setg(errp, "I3C shared-memory size is zero");
+        return false;
+    }
+
+    mr = host_memory_backend_get_memory(s->simulate_i3c_memdev);
+
+    if (!mr)
+    {
+        error_setg(errp, "failed to get I3C memory region");
+        return false;
+    }
+
+    backend_size = memory_region_size(mr);
+
+    if (s->simulate_i3c_shm_offset > backend_size || s->simulate_i3c_shm_size > backend_size - s->simulate_i3c_shm_offset)
+    {
+        error_setg(
+            errp,
+            "I3C shared-memory range outside backend: "
+            "offset=0x%" PRIx64
+            " size=0x%" PRIx64
+            " backend=0x%" PRIx64,
+            s->simulate_i3c_shm_offset,
+            s->simulate_i3c_shm_size,
+            backend_size
+        );
+
+        return false;
+    }
+
+    base = memory_region_get_ram_ptr(mr);
+    if (!base)
+    {
+        error_setg(
+            errp,
+            "failed to obtain I3C memory backend pointer"
+        );
+        return false;
+    }
+
+    s->simulate_i3c_shm_ptr = base + s->simulate_i3c_shm_offset;
+    printf(
+        "[I3C] SHM mapped: base=%p offset=0x%" PRIx64
+        " size=0x%" PRIx64 " ptr=%p\n",
+        base,
+        s->simulate_i3c_shm_offset,
+        s->simulate_i3c_shm_size,
+        s->simulate_i3c_shm_ptr
+    );
+
+    return true;
+}
 
 static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
 {
@@ -175,6 +453,56 @@ static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
     }
     return result.data;
     // return 0;
+}
+
+static int send_cdb_to_i3c_phison_model_tester(
+    SCSIDiskState *s,
+    const uint8_t *cdb,
+    uint64_t shm_offset,
+    uint32_t xfer_len)
+{
+    PhisonI3COpInfo info = {0};
+    PhisonI3COpResult result = {0};
+
+    memcpy(info.cdb, cdb, sizeof(info.cdb));
+
+    info.shm_offset = shm_offset;
+    info.xfer_len     = xfer_len;
+
+    printf("[I3C] Sending descriptor:"
+           " offset=0x%" PRIx64
+           " len=%u"
+           " dir=%u\n",
+           shm_offset,
+           length,
+           direction);
+
+    int bytes_sent = send(s->simulate_i3c_port_socket,&info,sizeof(PhisonI3COpInfo),0);
+
+    if (bytes_sent != sizeof(PhisonI3COpInfo))
+    {
+        printf("[I3C] socket send failed/partial: %d/%zu\n",
+               bytes_sent,
+               sizeof(PhisonI3COpInfo));
+
+        return -1;
+    }
+
+    int bytes_received =
+        recv(s->simulate_i3c_port_socket,
+             &result,
+             sizeof(PhisonI3COpResult),
+             0);
+
+    if (bytes_received != sizeof(PhisonI3COpResult))
+    {
+        printf("[I3C] socket recv failed/partial: %d/%zu\n",
+               bytes_received,
+               sizeof(PhisonI3COpResult));
+
+        return -1;
+    }
+    return (result.result == 0) ? 0 : -1;
 }
 
 static void scsi_free_request(SCSIRequest *req)
@@ -916,11 +1244,23 @@ static int scsi_disk_emulate_inquiry(SCSIRequest *req, uint8_t *outbuf)
     outbuf[2] = s->qdev.default_scsi_version;
     outbuf[3] = 2 | 0x10; /* Format 2, HiSup */
 
-    if (buflen > 36) {
-        outbuf[4] = buflen - 5; /* Additional Length = (Len - 1) - 4 */
-    } else {
-        /* If the allocation length of CDB is too small,
-               the additional length is not adjusted */
+    // if (buflen > 36) {
+    //     outbuf[4] = buflen - 5; /* Additional Length = (Len - 1) - 4 */
+    // } else {
+    //     /* If the allocation length of CDB is too small,
+    //            the additional length is not adjusted */
+    //     outbuf[4] = 36 - 5;
+    // }
+    if (PHISON_MODEL_I3C_MODE_ENABLED(s))
+    {
+        outbuf[4] = 96 - 5; 
+    }
+    else if (buflen > 36)
+    {
+        outbuf[4] = buflen - 5;
+    }
+    else
+    {
         outbuf[4] = 36 - 5;
     }
 
@@ -2664,6 +3004,7 @@ static void scsi_unrealize(SCSIDevice *dev)
 static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, dev);
+    g_autofree char *model_ip = NULL;
 
     /* can happen for devices without drive. The error message for missing
      * backend will be issued in scsi_realize
@@ -2681,6 +3022,22 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
 
     
     s->simulate_one_port_socket = -1;
+    s->simulate_i3c_shm_ptr = NULL;
+    qemu_mutex_init(&s->simulate_i3c_mutex);
+    s->simulate_i3c_port_socket = -1;
+
+    if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s) || PHISON_MODEL_I3C_MODE_ENABLED(s))
+    {
+        model_ip = object_property_get_str(OBJECT(s->phison_source),"phison_model_ip",errp);
+        if (!model_ip)
+        {
+            return;
+        }
+        printf(
+            "[Phison] Using model IP from NVMe: %s\n",
+            model_ip
+        );
+    }
     printf("[Tester] going into socket creation block\n");
     fflush(stdout);
     if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)){
@@ -2696,7 +3053,7 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(s->simulate_one_port_port);
         
-        if (inet_pton(AF_INET, s->simulate_one_port_ip, &server_addr.sin_addr) <= 0) {
+        if (inet_pton(AF_INET, model_ip, &server_addr.sin_addr) <= 0) {
             error_setg(errp, "nvme phison model socket inet pton fail.");
             return;
         }
@@ -2705,6 +3062,38 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
 
         if (connect(s->simulate_one_port_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
             error_setg(errp, "nvme phison model socket connect fail.");
+            return;
+        }
+    }
+
+    if (PHISON_MODEL_I3C_MODE_ENABLED(s)){
+        
+        if (!i3c_map_shared_memory(s, errp))
+        {
+            return;
+        }
+
+        struct sockaddr_in server_addr = {0};
+        s->simulate_i3c_port_socket = socket(AF_INET, SOCK_STREAM, 0);
+        //printf("client sock created\n");
+        //fflush(stdout);
+        if (s->simulate_i3c_port_socket < 0) {
+            error_setg(errp, "i3c phison model socket construct fail.");
+            return;
+        }
+
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(s->simulate_i3c_port);
+        
+        if (inet_pton(AF_INET, model_ip, &server_addr.sin_addr) <= 0) {
+            error_setg(errp, "i3c phison model socket inet pton fail.");
+            return;
+        }
+        //printf("inet_pton done\n");
+        //fflush(stdout);
+
+        if (connect(s->simulate_i3c_port_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+            error_setg(errp, "i3c phison model socket connect fail.");
             return;
         }
     }
@@ -2740,6 +3129,19 @@ static void scsi_cd_realize(SCSIDevice *dev, Error **errp)
     scsi_realize(&s->qdev, errp);
 }
 
+static const SCSIReqOps scsi_i3c_reqops = {
+    .size         = sizeof(SCSIDiskReq),
+    .free_req     = scsi_free_request,
+    .send_command = scsi_i3c_send_command,
+
+    /*
+     * read buffer behaves exactly like an emulated
+     * SCSI read buffer once we've filled it.
+     */
+    .read_data    = scsi_disk_emulate_read_data,
+    .write_data   = scsi_i3c_write_data,
+    .get_buf      = scsi_get_buf,
+};
 
 static const SCSIReqOps scsi_disk_emulate_reqops = {
     .size         = sizeof(SCSIDiskReq),
@@ -2821,40 +3223,78 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
     SCSIRequest *req;
     const SCSIReqOps *ops;
     uint8_t command;
+
+    if (trace_event_get_state_backends(TRACE_SCSI_DISK_NEW_REQUEST)) {
+        scsi_disk_new_request_dump(lun, tag, buf);
+    }
+
     // printf("scsi_new_request CDB Received: ");
     // for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
     // {
     //     printf("0x%02X ", buf[i]);
     // }
     // printf("\n");
-    if (buf[0] == 0x06 && buf[1] == 0xF0) 
+    // if (buf[0] == 0x06 && buf[1] == 0xF0) 
+    // {
+    //     printf("Vendor md received, forward to model code.\n");
+    //     for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+    //     {
+    //         printf("0x%02X ", buf[i]);
+    //     }
+    //     printf("\n");
+    //     if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
+    //     {
+    //         send_cdb_to_phison_model_tester(s, buf);
+    //     }
+        
+    // }
+
+
+    // command = buf[0];
+    // ops = scsi_disk_reqops_dispatch[command];
+    // if (!ops) {
+    //     ops = &scsi_disk_emulate_reqops;
+    // }
+    // req = scsi_req_alloc(ops, &s->qdev, tag, lun, hba_private);
+
+    // if (trace_event_get_state_backends(TRACE_SCSI_DISK_NEW_REQUEST)) {
+    //     scsi_disk_new_request_dump(lun, tag, buf);
+    // }
+
+    // return req;
+    bool is_i3c_scan = (buf[0] == 0x06 && buf[1] == 0x05);
+    bool is_i3c_cmd = (buf[0] == 0x06 && buf[1] == 0xF0 && buf[2] == 0xE0);
+
+    if (PHISON_MODEL_I3C_MODE_ENABLED(s) && (is_i3c_scan || is_i3c_cmd))
     {
-        printf("Vendor md received, forward to model code.\n");
-        for(int i = 0; i < SCSI_CMD_BUF_SIZE; i++) 
+        SCSIDiskReq *r;
+        req = scsi_req_alloc(&scsi_i3c_reqops, &s->qdev, tag, lun, hba_private);
+        r = DO_UPCAST(SCSIDiskReq, req, req);
+        r->is_i3c_oob = true;
+        memset(r->i3c_cdb, 0, sizeof(r->i3c_cdb));
+        memcpy(r->i3c_cdb, buf, 16);
+        printf("[I3C] OOB CDB:");
+        for (int i = 0; i < 16; i++)
         {
-            printf("0x%02X ", buf[i]);
+            printf(" %02X", buf[i]);
         }
         printf("\n");
-        if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
-        {
-            send_cdb_to_phison_model_tester(s, buf);
-        }
-        
+        return req;
     }
-    
 
-
+    if (buf[0] == 0x06 && buf[1] == 0xF0 && PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
+    {
+        printf("Vendor md received, forward to model code.\n");
+        send_cdb_to_phison_model_tester(s, buf);
+    }
     command = buf[0];
     ops = scsi_disk_reqops_dispatch[command];
-    if (!ops) {
+    if (!ops)
+    {
         ops = &scsi_disk_emulate_reqops;
     }
     req = scsi_req_alloc(ops, &s->qdev, tag, lun, hba_private);
-
-    if (trace_event_get_state_backends(TRACE_SCSI_DISK_NEW_REQUEST)) {
-        scsi_disk_new_request_dump(lun, tag, buf);
-    }
-
+    
     return req;
 }
 
@@ -3335,8 +3775,12 @@ static Property scsi_hd_properties[] = {
                     quirks, SCSI_DISK_QUIRK_MODE_PAGE_VENDOR_SPECIFIC_APPLE,
                     0),
     DEFINE_BLOCK_CHS_PROPERTIES(SCSIDiskState, qdev.conf),
-    DEFINE_PROP_STRING("simulate_one_port_ip", SCSIDiskState, simulate_one_port_ip),
+    DEFINE_PROP_LINK("phison_source", SCSIDiskState, phison_source, TYPE_DEVICE, DeviceState *),
     DEFINE_PROP_UINT16("simulate_one_port_port", SCSIDiskState, simulate_one_port_port, 0),
+    DEFINE_PROP_UINT16("simulate_i3c_port", SCSIDiskState, simulate_i3c_port, 0),
+    DEFINE_PROP_LINK("simulate_i3c_memdev", SCSIDiskState, simulate_i3c_memdev, TYPE_MEMORY_BACKEND, HostMemoryBackend *),
+    DEFINE_PROP_SIZE("simulate_i3c_shm_offset", SCSIDiskState, simulate_i3c_shm_offset, 0),
+    DEFINE_PROP_SIZE("simulate_i3c_shm_size", SCSIDiskState, simulate_i3c_shm_size, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -3364,6 +3808,7 @@ static void scsi_hd_class_initfn(ObjectClass *klass, void *data)
     sc->unrealize    = scsi_unrealize;
     sc->alloc_req    = scsi_new_request;
     sc->unit_attention_reported = scsi_disk_unit_attention_reported;
+    sc->parse_cdb = scsi_hd_parse_cdb;
     dc->desc = "virtual SCSI disk";
     device_class_set_props(dc, scsi_hd_properties);
     dc->vmsd  = &vmstate_scsi_disk_state;
