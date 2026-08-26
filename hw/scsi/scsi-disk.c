@@ -148,6 +148,35 @@ struct SCSIDiskState {
 };
 
 // ============================================================
+// TCP keepalive + user timeout: lets the kernel detect a
+// sudden-death peer without any application-level heartbeat
+// ============================================================
+static void phison_set_socket_keepalive(int fd)
+{
+    int enable = 1;
+    int idle   = 2;   // start probing after 2s of no traffic
+    int intvl  = 2;   // 2s between each probe
+    int cnt    = 2;   // 2 consecutive unanswered probes = dead
+
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+
+    // Hard ceiling on "time since the last ACK we received", in ms.
+    // This covers BOTH real outbound data waiting on a retransmit
+    // AND the keepalive probes above waiting on a response — if
+    // either goes unacknowledged past this timeout, the connection
+    // is force-failed immediately instead of waiting out TCP's
+    // much longer default retransmission backoff (which can run
+    // into minutes). Effectively acts as an upper bound for the
+    // keepalive sequence too, since it doesn't care whether the
+    // unacked packet was a probe or actual data.
+    unsigned int user_timeout_ms = 6000;
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
+}
+
+// ============================================================
 // One-port reconnect state machine
 // ============================================================
 static void simulate_one_port_reconnect_start(SCSIDiskState *s);
@@ -225,7 +254,7 @@ static void simulate_one_port_on_connected(void *opaque)
 
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-
+    phison_set_socket_keepalive(fd);
     s->simulate_one_port_socket = fd;
 
     /* ← 補上：重新掛 disconnect handler，否則下一次斷線偵測不到 */
@@ -3006,6 +3035,7 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
             error_setg(errp, "nvme phison model socket connect fail.");
             return;
         }
+        phison_set_socket_keepalive(s->simulate_one_port_socket);
         if (PHISON_MODEL_TESTER_RECONNECT_ENABLED(s))
         {
             printf("Tester Reconnect Enabled!\n");
