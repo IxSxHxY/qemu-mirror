@@ -176,8 +176,7 @@ static int send_cdb_to_i3c_phison_model_tester(
     SCSIDiskState *s,
     const uint8_t *cdb,
     uint64_t shm_offset,
-    uint32_t length,
-    uint8_t direction);
+    uint32_t xfer_len);
 
 typedef struct QEMU_PACKED PhisonI3COpResult
 {
@@ -471,11 +470,9 @@ static int send_cdb_to_i3c_phison_model_tester(
 
     printf("[I3C] Sending descriptor:"
            " offset=0x%" PRIx64
-           " len=%u"
-           " dir=%u\n",
+           " len=%u\n",
            shm_offset,
-           length,
-           direction);
+           xfer_len);
 
     int bytes_sent = send(s->simulate_i3c_port_socket,&info,sizeof(PhisonI3COpInfo),0);
 
