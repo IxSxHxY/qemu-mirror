@@ -339,7 +339,7 @@ static int scsi_hd_parse_cdb(SCSIDevice *d, SCSICommand *cmd, uint8_t *buf, size
         cmd->mode = SCSI_XFER_FROM_DEV;
         return 0;
     }
-    if (PHISON_MODEL_I3C_MODE_ENABLED(s) && buf_len >= 16 && buf[0] == 0x06 && buf[1] == 0xF0 && buf[2] == 0xE0)
+    if (PHISON_MODEL_I3C_MODE_ENABLED(s) && buf_len >= 16 && buf[0] == 0x06 && buf[1] == 0xF0)
     {
         return scsi_bus_parse_cdb(
             &s->qdev,
@@ -3260,7 +3260,7 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
 
     // return req;
     bool is_i3c_scan = (buf[0] == 0x06 && buf[1] == 0x05);
-    bool is_i3c_cmd = (buf[0] == 0x06 && buf[1] == 0xF0 && buf[2] == 0xE0);
+    bool is_i3c_cmd = (buf[0] == 0x06 && buf[1] == 0xF0);
 
     if (PHISON_MODEL_I3C_MODE_ENABLED(s) && (is_i3c_scan || is_i3c_cmd))
     {
