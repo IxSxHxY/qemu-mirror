@@ -8211,7 +8211,7 @@ static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is
     if (sock_fd < 0 || !data || size == 0) {
         return -1;
     }
-
+    printf("Use socket (fd %d), is_send = %d\n", sock_fd, is_send);
     if (is_send) {
         // --- 執行發送邏輯 ---
         ssize_t sent = send(sock_fd, data, size, 0);
@@ -8259,6 +8259,7 @@ static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is
         timeout.tv_usec = 0;
         setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     }
+printf("phison_model_socket_use Action completed\n");
 
     return 0;
 }
