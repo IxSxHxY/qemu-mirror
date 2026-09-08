@@ -9329,97 +9329,145 @@ void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
                             BDRV_REQUEST_MAX_BYTES / nvme_l2b(ns, 1));
 }
 
-// static void phison_socket_read_handler(void *opaque) {
-//     NvmeCtrl *n = opaque;
-//     PCIDevice *pci = PCI_DEVICE(n);
-//     PhisonMMIoOpResult result;
-//     printf("[phison_socket_read_handler] n = %p\n", n);
-//     // send_mmio_op_to_phison_model_ver2(&result, n, addr, size, PHISON_MODEL_MMIO_OP_WRITE, data);
-//     int bytes_received = recv(n->phison_model_nvme_client_socket, &result, sizeof(PhisonMMIoOpResult), 0);
-//     if (bytes_received == 0) {
-//         // The client has closed the connection
-//         printf("nvme phison model socket model closed connection\n");
-//         close(n->phison_model_nvme_client_socket);
-//         n->phison_model_nvme_client_socket = -1;
-//         result.result = PHISON_MODEL_MMIO_RESULT_FAIL;
-//         return;
-//     } else if (bytes_received < 0) {
-//         printf("nvme phison model socket recv fail\n");
-//         close(n->phison_model_nvme_client_socket);
-//         n->phison_model_nvme_client_socket = -1;
-//         result.result = PHISON_MODEL_MMIO_RESULT_FAIL;
-//         return;
-//     } 
-//     printf("result.result = %ld | result.data = %ld\n", result.result, result.data);
-//     if (result.result == PHISON_MODEL_MMIO_RESULT_MSIX)
-//     {
-//         printf("Assert MSIX...\n");
-//         uint64_t vector = result.data;
-//         if (!pci->msix_entry_used[vector])
-//         {
-//             msix_vector_use(pci, vector);
-//         }
-//         msix_notify(pci, vector);
-//         printf("MSIX completed!\n");
-//     }
+#include "hw/qdev-core.h"   /* qdev_find_recursive(), qdev_get_parent_bus(), BusState, DeviceState */
+#include "hw/sysbus.h"      /* sysbus_get_default() */
+#include "hw/pci/pci.h"     /* PCIDevice, pci_is_express(), pci_word_test_and_*_mask() */
+#include "hw/pci/pcie.h"    /* PCI_EXP_LNKSTA, PCI_EXP_LNKSTA_DLLLA */
+#include "qom/object.h"     /* object_dynamic_cast() */
 
-// }
+/*
+ * 设置/清除 Link Status 寄存器里的 Data Link Layer Link Active (DLLLA) 位
+ * dev:    必须是带 PCI Express capability 的 PCIDevice
+ * active: true = 置 1, false = 置 0
+ * 返回值: true = 成功, false = 该 device 不是 PCIe / 没有 exp cap
+ */
+static bool pcie_lnksta_set_dllla(PCIDevice *dev, bool active)
+{
+    uint8_t *exp_cap;
+    uint16_t lnksta_before, lnksta_after;
 
-// static void *nvme_rpc_thread(void *opaque)
-// {
-//     NvmeCtrl *n = opaque;
-//     PCIDevice *pci = PCI_DEVICE(n);
+    printf("[pcie_lnksta_set_dllla] enter: dev=%p, active=%d\n", dev, active);
 
-//     while (true) {
-//         printf("[nvme_rpc_thread] This is RPC thread! phison_model_rpc_client_socket = %d\n", n->phison_model_rpc_client_socket);
-//         PhisonMMIoOpResult send = {0};
-//         PhisonMMIoOpResult receive = {0};
-//         bool is_send = false;
-//         printf("[nvme_rpc_thread] Listening!\n");
-//         // phison_model_recv_mmio_result(n, &receive);
-//         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &receive, sizeof(PhisonMMIoOpResult), is_send);
-//         printf("[nvme_rpc_thread] receive data! result = 0x%lX, data = 0x%lX\n", receive.result, receive.data);
-//         if (receive.result == PHISON_MODEL_MMIO_RESULT_MSIX)
-//         {
-//             uint16_t vector = receive.data;
-//             printf("Assert MSIX...\n");
-//             // if (vector < pci->msix_entries_nr && !pci->msix_entry_used[vector])
-//             // {
-//             //     msix_vector_use(pci, vector);
-//             // }
-//             msix_notify(pci, vector);
-//             printf("MSIX completed!\n");
-//         }
-//         else if (receive.result == PHISON_MODEL_MMIO_RESULT_MARK_VEC_USE)
-//         {
-//             uint16_t vector = (uint16_t) receive.data;
-//             printf("Mark MSIX vector %d use...\n", vector);
-//             if (vector < pci->msix_entries_nr && !pci->msix_entry_used[vector])
-//             {
-//                 msix_vector_use(pci, vector);
-//             }
-//             is_send = true;
-//             send.result = 1;
-//             send.data = 0;
-//             phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send, sizeof(PhisonMMIoOpResult), is_send);
-            
-//         }
-//         else if (receive.result == PHISON_MODEL_MMIO_RESULT_MARK_VEC_UNUSE)
-//         {
-//             uint16_t vector = (uint16_t) receive.data;
-//             printf("Mark MSIX vector %d unuse...\n", vector);
-//             if (vector < pci->msix_entries_nr && pci->msix_entry_used[vector])
-//             {
-//                 msix_vector_unuse(pci, vector);
-//             }
-//             is_send = true;
-//             send.result = 1;
-//             send.data = 0;
-//             phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send, sizeof(PhisonMMIoOpResult), is_send);
-//         }
-//     }
-//     return NULL;
-// }
+    if (!dev) {
+        printf("[pcie_lnksta_set_dllla] FAIL: dev is NULL\n");
+        return false;
+    }
+
+    printf("[pcie_lnksta_set_dllla] dev qom type = %s\n",
+           object_get_typename(OBJECT(dev)));
+
+    if (!pci_is_express(dev)) {
+        printf("[pcie_lnksta_set_dllla] FAIL: dev is not a PCIe device\n");
+        return false;
+    }
+    printf("[pcie_lnksta_set_dllla] pci_is_express(dev) == true\n");
+
+    if (!dev->exp.exp_cap) {
+        printf("[pcie_lnksta_set_dllla] FAIL: exp.exp_cap == 0 (no PCIe capability found)\n");
+        return false;
+    }
+    printf("[pcie_lnksta_set_dllla] exp_cap offset = 0x%x\n", dev->exp.exp_cap);
+
+    exp_cap = dev->config + dev->exp.exp_cap;
+
+    lnksta_before = pci_get_word(exp_cap + PCI_EXP_LNKSTA);
+    printf("[pcie_lnksta_set_dllla] LNKSTA before = 0x%04x (DLLLA=%d)\n",
+           lnksta_before,
+           !!(lnksta_before & PCI_EXP_LNKSTA_DLLLA));
+
+    if (active) {
+        printf("[pcie_lnksta_set_dllla] setting DLLLA bit (0x%04x)\n",
+               PCI_EXP_LNKSTA_DLLLA);
+        pci_word_test_and_set_mask(exp_cap + PCI_EXP_LNKSTA,
+                                    PCI_EXP_LNKSTA_DLLLA);
+    } else {
+        printf("[pcie_lnksta_set_dllla] clearing DLLLA bit (0x%04x)\n",
+               PCI_EXP_LNKSTA_DLLLA);
+        pci_word_test_and_clear_mask(exp_cap + PCI_EXP_LNKSTA,
+                                      PCI_EXP_LNKSTA_DLLLA);
+    }
+
+    lnksta_after = pci_get_word(exp_cap + PCI_EXP_LNKSTA);
+    printf("[pcie_lnksta_set_dllla] LNKSTA after  = 0x%04x (DLLLA=%d)\n",
+           lnksta_after,
+           !!(lnksta_after & PCI_EXP_LNKSTA_DLLLA));
+
+    printf("[pcie_lnksta_set_dllla] exit: success\n");
+    return true;
+}
+
+/*
+ * 拓扑: pcie-root-port -> upstream_bus -> n (NvmeCtrl)
+ * 找到 n 所插入的上游 bus，再找到该 bus 的拥有者（即 pcie-root-port 本身），
+ * 对 root port 的 config space 操作 DLLLA 位。
+ * 返回值: true = 成功, false = 找不到 / parent 不是 PCI device
+ */
+static bool pcie_lnksta_set_bridge_dllla(NvmeCtrl *n, bool active)
+{
+    DeviceState *n_dev;
+    BusState *upstream_bus;
+    DeviceState *bridge_devstate;
+    PCIDevice *dev;
+    bool ret;
+
+    printf("[pcie_lnksta_set_bridge_dllla] enter: n=%p, active=%d\n", n, active);
+
+    if (!n) {
+        printf("[pcie_lnksta_set_bridge_dllla] FAIL: n is NULL\n");
+        return false;
+    }
+
+    /* step 0: n 自己作为 DeviceState */
+    n_dev = DEVICE(n);
+    printf("[pcie_lnksta_set_bridge_dllla] step0: n_dev=%p, qom type=%s\n",
+           n_dev, object_get_typename(OBJECT(n_dev)));
+
+    /* step 1: 拿到 n 所插入的上游 bus（root port 创建的 downstream bus），
+     *         不是 n 自己创建的 n->bus！ */
+    upstream_bus = qdev_get_parent_bus(n_dev);
+    printf("[pcie_lnksta_set_bridge_dllla] step1: upstream_bus=%p, bus name=%s, bus qom type=%s\n",
+           upstream_bus,
+           upstream_bus && upstream_bus->name ? upstream_bus->name : "(null)",
+           upstream_bus ? object_get_typename(OBJECT(upstream_bus)) : "(null)");
+
+    if (!upstream_bus) {
+        printf("[pcie_lnksta_set_bridge_dllla] FAIL: upstream_bus is NULL\n");
+        return false;
+    }
+
+    /* step 2: 拿到这条上游 bus 的 parent device（即 pcie-root-port 本身） */
+    bridge_devstate = upstream_bus->parent;
+    printf("[pcie_lnksta_set_bridge_dllla] step2: upstream_bus->parent=%p\n", bridge_devstate);
+
+    if (!bridge_devstate) {
+        printf("[pcie_lnksta_set_bridge_dllla] FAIL: upstream_bus->parent is NULL "
+               "(n is directly on the main PCI bus, no bridge above it)\n");
+        return false;
+    }
+    printf("[pcie_lnksta_set_bridge_dllla] step2: bridge_devstate qom type=%s, id=%s\n",
+           object_get_typename(OBJECT(bridge_devstate)),
+           bridge_devstate->id ? bridge_devstate->id : "(no id)");
+
+    /* step 3: 转成 PCIDevice，用 dynamic_cast 避免类型不对时直接 abort */
+    dev = (PCIDevice *)object_dynamic_cast(OBJECT(bridge_devstate), TYPE_PCI_DEVICE);
+    printf("[pcie_lnksta_set_bridge_dllla] step3: object_dynamic_cast -> dev=%p\n", dev);
+
+    if (!dev) {
+        printf("[pcie_lnksta_set_bridge_dllla] FAIL: bridge_devstate (%s) is NOT a PCIDevice\n",
+               object_get_typename(OBJECT(bridge_devstate)));
+        return false;
+    }
+
+    printf("[pcie_lnksta_set_bridge_dllla] step3 OK: dev qom type=%s, name=%s\n",
+           object_get_typename(OBJECT(dev)),
+           dev->name);
+
+    /* step 4: 真正去改 root port 自己的 LNKSTA（预期 exp_cap offset 应为 0x54 附近） */
+    ret = pcie_lnksta_set_dllla(dev, active);
+
+    printf("[pcie_lnksta_set_bridge_dllla] exit: ret=%d\n", ret);
+    return ret;
+}
 
 static void phison_rpc_read_handler(void *opaque)
 {
@@ -9459,7 +9507,7 @@ static void phison_rpc_read_handler(void *opaque)
         {
             msix_vector_use(pci, vector);
         }
-        
+        printf("MSIX vector use successfully!\n");
         is_send = true;
         send_data.result = 1;
         send_data.data = 0;
@@ -9473,7 +9521,41 @@ static void phison_rpc_read_handler(void *opaque)
         {
             msix_vector_unuse(pci, vector);
         }
-        
+        printf("MSIX vector unuse successfully!\n");
+        is_send = true;
+        send_data.result = 1;
+        send_data.data = 0;
+        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
+    }
+    else if (receive.result == PHISON_MODEL_MMIO_RESULT_DEACTIVATE_BRIDGE_LINK)
+    {
+        bool ok;
+        printf("[phison_rpc_read_handler] branch: DEACTIVATE_BRIDGE_LINK\n");
+        printf("Deactive Bridge Link (1 -> 0)\n");
+        ok = pcie_lnksta_set_bridge_dllla(n, false);
+        printf("[phison_rpc_read_handler] pcie_lnksta_set_bridge_dllla(false) returned %d\n", ok);
+        printf("Deactive Bridge Link successfully!\n");
+        is_send = true;
+        send_data.result = 1;
+        send_data.data = 0;
+        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
+    }
+    else if (receive.result == PHISON_MODEL_MMIO_RESULT_ACTIVATE_BRIDGE_LINK)
+    {
+        bool ok;
+        printf("[phison_rpc_read_handler] branch: ACTIVATE_BRIDGE_LINK\n");
+        printf("Active Bridge Link (0 -> 1)\n");
+        ok = pcie_lnksta_set_bridge_dllla(n, true);
+        printf("[phison_rpc_read_handler] pcie_lnksta_set_bridge_dllla(true) returned %d\n", ok);
+        printf("Active Bridge Link successfully!\n");
+        is_send = true;
+        send_data.result = 1;
+        send_data.data = 0;
+        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
+    }
+    else
+    {
+        printf("Unknown RPC call = %ld!!\n", receive.result);
         is_send = true;
         send_data.result = 1;
         send_data.data = 0;
