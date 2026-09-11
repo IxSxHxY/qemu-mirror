@@ -8954,7 +8954,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
     uint64_t local_val = nvme_mmio_read(opaque, addr, size);
- 
+    uint64_t final_val = 0;
     if (n->phison_conn_state != PHISON_CONN_CONNECTED) {
         printf("[MMIO READ] Not connected (state=%d), returning local\n",
                n->phison_conn_state);
@@ -8968,7 +8968,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
         .data   = 0
     };
     int vmid = get_vmid_from_qmp_chardev();
-
+    int sock_fd = n->phison_model_nvme_client_socket;
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
         PhisonMMIoOpResult result;
         int stuck_seconds = 0;
@@ -8978,7 +8978,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
             int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
 
             if (ret == 0) {
-                final_val = (uint32_t)result.data;
+                final_val = result.data;
                 phison_socket_update_status("NVME Register", vmid, n->params.phison_model_ip,
                                              qemu_name, 0);
                 break;
@@ -8992,15 +8992,16 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
                 {
                     phison_on_disconnect(n);
                 }
+                break;
             }
         }
     }
  
     printf("[MMIO 18299] Read | Addr:0x%08lX | Sz:%d | Local:0x%08lX | Model:0x%08lX\n",
-           addr, size, local_val, resp.data);
-    return resp.data;
+           addr, size, local_val, final_val);
+    return final_val;
 }
- 
+
 static void nvme_mmio_write_phison_model(void *opaque, hwaddr addr, uint64_t data,
                                          unsigned size)
 {
@@ -9725,140 +9726,6 @@ void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
                             BDRV_REQUEST_MAX_BYTES / nvme_l2b(ns, 1));
 }
 
-static void phison_rpc_read_handler(void *opaque)
-{
-    NvmeCtrl *n = opaque;
-    PCIDevice *pci = PCI_DEVICE(n);
-    PhisonMMIoOpResult receive = {0};
-    PhisonMMIoOpResult send_data = {0};
-    bool is_send = false;
-    int vmid = get_vmid_from_qmp_chardev();
-    int stuck_seconds = 0;
-    int ret;
-
-    while (true) {
-        ret = phison_model_socket_use((int)n->phison_model_rpc_client_socket,
-                                       (void*) &receive, sizeof(PhisonMMIoOpResult),
-                                       is_send);
-        if (ret == 0) {
-            phison_socket_update_status("RPC", vmid, n->params.phison_model_ip,
-                                         qemu_name, 0);
-            break;
-        } else if (ret == -2) {
-            stuck_seconds++;
-            phison_socket_update_status("RPC", vmid, n->params.phison_model_ip,
-                                         qemu_name, stuck_seconds);
-        } else {
-            printf("[phison_rpc_read_handler] Connection closed or error. Unregistering FD.\n");
-            qemu_set_fd_handler(n->phison_model_rpc_client_socket, NULL, NULL, NULL);
-            return;
-        }
-    }
-
-    printf("[phison_rpc_read_handler] receive data! result = 0x%lX, data = 0x%lX\n", receive.result, receive.data);
-
-    if (receive.result == PHISON_MODEL_MMIO_RESULT_MSIX)
-    {
-        uint16_t vector = receive.data;
-        printf("Assert MSIX...\n");
-        msix_notify(pci, vector);
-        printf("MSIX completed!\n");
-
-        is_send = true;
-        send_data.result = 1;
-        send_data.data = 0;
-        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-    }
-    else if (receive.result == PHISON_MODEL_MMIO_RESULT_MARK_VEC_USE)
-    {
-        uint16_t vector = (uint16_t) receive.data;
-        printf("Mark MSIX vector %d use...\n", vector);
-        if (vector < pci->msix_entries_nr && !pci->msix_entry_used[vector])
-        {
-            msix_vector_use(pci, vector);
-        }
-        
-        is_send = true;
-        send_data.result = 1;
-        send_data.data = 0;
-        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-    }
-    else if (receive.result == PHISON_MODEL_MMIO_RESULT_MARK_VEC_UNUSE)
-    {
-        uint16_t vector = (uint16_t) receive.data;
-        printf("Mark MSIX vector %d unuse...\n", vector);
-        if (vector < pci->msix_entries_nr && pci->msix_entry_used[vector])
-        {
-            msix_vector_unuse(pci, vector);
-        }
-        
-        is_send = true;
-        send_data.result = 1;
-        send_data.data = 0;
-        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-    }
-}
-
-
-// static void phison_rpc_read_handler(void *opaque)
-// {
-//     NvmeCtrl *n = opaque;
-//     PCIDevice *pci = PCI_DEVICE(n);
-//     PhisonMMIoOpResult receive = {0};
-//     PhisonMMIoOpResult send_data = {0};
-//     bool is_send = false;
-
-//     int ret = phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &receive, sizeof(PhisonMMIoOpResult), is_send);
-
-//     if (ret < 0) {
-//         printf("[phison_rpc_read_handler] Connection closed or error. Unregistering FD.\n");
-//         qemu_set_fd_handler(n->phison_model_rpc_client_socket, NULL, NULL, NULL);
-//         return;
-//     }
-
-//     printf("[phison_rpc_read_handler] receive data! result = 0x%lX, data = 0x%lX\n", receive.result, receive.data);
-
-//     if (receive.result == PHISON_MODEL_MMIO_RESULT_MSIX)
-//     {
-//         uint16_t vector = receive.data;
-//         printf("Assert MSIX...\n");
-//         msix_notify(pci, vector);
-//         printf("MSIX completed!\n");
-
-//         is_send = true;
-//         send_data.result = 1;
-//         send_data.data = 0;
-//         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-//     }
-//     else if (receive.result == PHISON_MODEL_MMIO_RESULT_MARK_VEC_USE)
-//     {
-//         uint16_t vector = (uint16_t) receive.data;
-//         printf("Mark MSIX vector %d use...\n", vector);
-//         if (vector < pci->msix_entries_nr && !pci->msix_entry_used[vector])
-//         {
-//             msix_vector_use(pci, vector);
-//         }
-        
-//         is_send = true;
-//         send_data.result = 1;
-//         send_data.data = 0;
-//         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-//     }
-//     else if (receive.result == PHISON_MODEL_MMIO_RESULT_MARK_VEC_UNUSE)
-//     {
-//         uint16_t vector = (uint16_t) receive.data;
-//         printf("Mark MSIX vector %d unuse...\n", vector);
-//         if (vector < pci->msix_entries_nr && pci->msix_entry_used[vector])
-//         {
-//             msix_vector_unuse(pci, vector);
-//         }
-        
-//         is_send = true;
-//         send_data.result = 1;
-//         send_data.data = 0;
-//         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-//     }
-// }
 
 static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 {
@@ -10291,7 +10158,7 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
 {
     NvmeCtrl *n = NVME(dev);
     uint32_t local_val = nvme_pci_read_config(dev, address, len);
- 
+    uint32_t final_val = 0xFFFFFFFF;
     if (n->phison_conn_state != PHISON_CONN_CONNECTED) {
         printf("[PCI READ] Not connected (state=%d), returning 0xFFFFFFFF\n",
                n->phison_conn_state);
@@ -10306,7 +10173,7 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
     };
     int vmid = get_vmid_from_qmp_chardev();
 
-
+    int sock_fd = n->phison_model_pci_client_socket;
     // 請求讀取
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
         PhisonMMIoOpResult result;
