@@ -9638,27 +9638,17 @@ static void phison_rpc_read_handler(void *opaque)
         send_data.data = 0;
         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
     }
-    else if (receive.result == PHISON_MODEL_MMIO_RESULT_DEACTIVATE_BRIDGE_LINK)
-    {
+    else if (receive.result == PHISON_MODEL_MMIO_RESULT_SET_BRIDGE_DLLLA)
+    {   
+        bool val_to_set = (receive.data == 1) ? true : false;
         bool ok;
-        printf("[phison_rpc_read_handler] branch: DEACTIVATE_BRIDGE_LINK\n");
-        printf("Deactive Bridge Link (1 -> 0)\n");
-        ok = pcie_lnksta_set_bridge_dllla(n, false);
+        printf("[phison_rpc_read_handler] PHISON_MODEL_MMIO_RESULT_SET_BRIDGE_DLLLA\n");
+        if (val_to_set) printf("[phison_rpc_read_handler] Activate Bridge Link\n");
+        else printf("[phison_rpc_read_handler] Deactivate Bridge Link\n");
+        ok = pcie_lnksta_set_bridge_dllla(n, val_to_set);
         printf("[phison_rpc_read_handler] pcie_lnksta_set_bridge_dllla(false) returned %d\n", ok);
-        printf("Deactive Bridge Link successfully!\n");
-        is_send = true;
-        send_data.result = 1;
-        send_data.data = 0;
-        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
-    }
-    else if (receive.result == PHISON_MODEL_MMIO_RESULT_ACTIVATE_BRIDGE_LINK)
-    {
-        bool ok;
-        printf("[phison_rpc_read_handler] branch: ACTIVATE_BRIDGE_LINK\n");
-        printf("Active Bridge Link (0 -> 1)\n");
-        ok = pcie_lnksta_set_bridge_dllla(n, true);
-        printf("[phison_rpc_read_handler] pcie_lnksta_set_bridge_dllla(true) returned %d\n", ok);
-        printf("Active Bridge Link successfully!\n");
+        if (val_to_set) printf("[phison_rpc_read_handler] Activate Bridge Link successfully!\n");
+        else printf("[phison_rpc_read_handler] Deactivate Bridge Link successfully!\n");
         is_send = true;
         send_data.result = 1;
         send_data.data = 0;
