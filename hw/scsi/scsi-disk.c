@@ -108,6 +108,7 @@ typedef struct SCSIDiskReq {
 
     bool is_i3c_oob;
     uint8_t i3c_cdb[16];
+    int vendor_f0_result;
 } SCSIDiskReq;
 
 #define SCSI_DISK_F_REMOVABLE             0
@@ -420,38 +421,43 @@ static bool i3c_map_shared_memory(SCSIDiskState *s, Error **errp)
     return true;
 }
 
-static uint64_t send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
+static int send_cdb_to_phison_model_tester(SCSIDiskState *s, uint8_t *cdb)
 {
-    // SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
     PhisonTesterOpInfo info = {0};
     PhisonTesterOpResult result = {0};
     memcpy(info.cdb, cdb, sizeof(info.cdb));
-    int bytes_sent = send(s->simulate_one_port_socket, &info, sizeof(PhisonTesterOpInfo), 0);
+    int bytes_sent = send(s->simulate_one_port_socket,&info,sizeof(PhisonTesterOpInfo),0);
+
     if (bytes_sent < 0)
     {
         printf("nvme phison model pci socket send fail\n");
-        return 0;
+        return -1;
     }
 
-    int bytes_received = recv(s->simulate_one_port_socket, &result, sizeof(PhisonTesterOpResult), 0);
+    int bytes_received = recv(s->simulate_one_port_socket,&result,sizeof(PhisonTesterOpResult),0);
 
     if (bytes_received == 0)
     {
-        // The client has closed the connection
         printf("nvme phison model pci socket model closed connection\n");
         close(s->simulate_one_port_socket);
         s->simulate_one_port_socket = -1;
-        return 0;
+        return -1;
     }
     else if (bytes_received < 0)
     {
         printf("nvme phison model pci socket recv fail\n");
         close(s->simulate_one_port_socket);
         s->simulate_one_port_socket = -1;
+        return -1;
+    }
+
+    if (result.data == 0)
+    {
         return 0;
     }
-    return result.data;
-    // return 0;
+
+    printf("nvme phison model pci socket model returned data=0x%" PRIx64 "\n",result.data);
+    return -1;
 }
 
 static int send_cdb_to_i3c_phison_model_tester(
@@ -2464,6 +2470,15 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     outbuf = r->iov.iov_base;
     memset(outbuf, 0, r->buflen);
     switch (req->cmd.buf[0]) {
+    case 0x06:
+        if (req->cmd.buf[1] != 0xF0 ||
+            !PHISON_MODEL_ONE_PORT_MODE_ENABLED(s) ||
+            r->vendor_f0_result != GOOD)
+        {
+            goto illegal_request;
+        }
+        break;
+
     case TEST_UNIT_READY:
         assert(blk_is_available(s->qdev.conf.blk));
         break;
@@ -3279,11 +3294,6 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
         return req;
     }
 
-    if (buf[0] == 0x06 && buf[1] == 0xF0 && PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
-    {
-        printf("Vendor md received, forward to model code.\n");
-        send_cdb_to_phison_model_tester(s, buf);
-    }
     command = buf[0];
     ops = scsi_disk_reqops_dispatch[command];
     if (!ops)
@@ -3291,7 +3301,16 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
         ops = &scsi_disk_emulate_reqops;
     }
     req = scsi_req_alloc(ops, &s->qdev, tag, lun, hba_private);
-    
+    if (buf[0] == 0x06 && buf[1] == 0xF0 && PHISON_MODEL_ONE_PORT_MODE_ENABLED(s))
+    {
+        SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
+        printf("Vendor md received, forward to model code.\n");
+        r->vendor_f0_result = CHECK_CONDITION;
+        if (send_cdb_to_phison_model_tester(s, buf) == 0)
+        {
+            r->vendor_f0_result = GOOD;
+        }
+    }
     return req;
 }
 
