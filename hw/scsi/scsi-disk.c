@@ -63,6 +63,7 @@
 #define MAX_SERIAL_LEN_FOR_DEVID    20
 
 #define PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)  ((s->simulate_one_port_port > 0) && (s->simulate_one_port_ip))
+#define PHISON_MODEL_TESTER_RECONNECT_ENABLED(s)  ((s->reconnect == true))
 
 
 OBJECT_DECLARE_TYPE(SCSIDiskState, SCSIDiskClass, SCSI_DISK_BASE)
@@ -101,6 +102,13 @@ typedef struct SCSIDiskReq {
 #define SCSI_DISK_F_DPOFUA                1
 #define SCSI_DISK_F_NO_REMOVABLE_DEVOPS   2
 
+typedef enum {
+    PHISON_CONN_CONNECTED,
+    PHISON_CONN_DISCONNECTED,
+    PHISON_CONN_RECONNECTING,
+} PhisonConnState;
+
+
 struct SCSIDiskState {
     SCSIDevice qdev;
     uint32_t features;
@@ -129,10 +137,167 @@ struct SCSIDiskState {
      */
     uint16_t rotation_rate;
     bool migrate_emulated_scsi_request;
+
     char *simulate_one_port_ip;
     uint16_t simulate_one_port_port;
     int simulate_one_port_socket;
+    PhisonConnState  simulate_one_port_conn_state;
+    QEMUTimer       *simulate_one_port_reconnect_timer;
+    int              simulate_one_port_reconnect_fd;   /* in-progress connect fd */
+    bool              reconnect;   /* in-progress connect fd */
 };
+
+// ============================================================
+// TCP keepalive + user timeout: lets the kernel detect a
+// sudden-death peer without any application-level heartbeat
+// ============================================================
+static void phison_set_socket_keepalive(int fd)
+{
+    int enable = 1;
+    int idle   = 2;   // start probing after 2s of no traffic
+    int intvl  = 2;   // 2s between each probe
+    int cnt    = 2;   // 2 consecutive unanswered probes = dead
+
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+
+    // Hard ceiling on "time since the last ACK we received", in ms.
+    // This covers BOTH real outbound data waiting on a retransmit
+    // AND the keepalive probes above waiting on a response — if
+    // either goes unacknowledged past this timeout, the connection
+    // is force-failed immediately instead of waiting out TCP's
+    // much longer default retransmission backoff (which can run
+    // into minutes). Effectively acts as an upper bound for the
+    // keepalive sequence too, since it doesn't care whether the
+    // unacked packet was a probe or actual data.
+    unsigned int user_timeout_ms = 6000;
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
+}
+
+// ============================================================
+// One-port reconnect state machine
+// ============================================================
+static void simulate_one_port_reconnect_start(SCSIDiskState *s);
+
+static void simulate_one_port_reconnect_fail(SCSIDiskState *s, int fd)
+{
+    if (fd >= 0) {
+        qemu_set_fd_handler(fd, NULL, NULL, NULL);
+        close(fd);
+        s->simulate_one_port_reconnect_fd = -1;
+    }
+    if (s->simulate_one_port_socket >= 0) {
+        qemu_set_fd_handler(s->simulate_one_port_socket, NULL, NULL, NULL);
+        close(s->simulate_one_port_socket);
+        s->simulate_one_port_socket = -1;
+    }
+    printf("[OnePort] Reconnect failed, retry in 1s\n");
+    s->simulate_one_port_conn_state = PHISON_CONN_DISCONNECTED;
+    timer_mod(s->simulate_one_port_reconnect_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
+}
+
+/* 你原本的，職責：清理 socket + 觸發 reconnect。維持不變 */
+static void simulate_one_port_on_disconnect(SCSIDiskState *s)
+{
+    if (s->simulate_one_port_conn_state == PHISON_CONN_RECONNECTING) return;
+
+    printf("[OnePort] Disconnected, starting reconnect\n");
+
+    if (s->simulate_one_port_socket >= 0) {
+        qemu_set_fd_handler(s->simulate_one_port_socket, NULL, NULL, NULL);
+        close(s->simulate_one_port_socket);
+        s->simulate_one_port_socket = -1;
+    }
+    s->simulate_one_port_conn_state = PHISON_CONN_DISCONNECTED;
+    simulate_one_port_reconnect_start(s);
+}
+
+/* 新加的，職責：給 qemu_set_fd_handler 用的正確簽名 wrapper，
+   做 MSG_PEEK 偵測，確認真的斷線才 call 上面那個 */
+static void simulate_one_port_disconnect_handler(void *opaque)
+{
+    SCSIDiskState *s = opaque;
+    int fd = s->simulate_one_port_socket;
+
+    char buf[1];
+    int ret = recv(fd, buf, sizeof(buf), MSG_PEEK | MSG_DONTWAIT);
+
+    if (ret == 0) {
+        printf("[OnePort] Disconnected (EOF), triggering reconnect\n");
+        simulate_one_port_on_disconnect(s);
+    } else if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        printf("[OnePort] Disconnected (errno=%d: %s), triggering reconnect\n",
+               errno, strerror(errno));
+        simulate_one_port_on_disconnect(s);
+    }
+}
+
+static void simulate_one_port_on_connected(void *opaque)
+{
+    SCSIDiskState *s = opaque;
+    int fd = s->simulate_one_port_reconnect_fd;
+
+    qemu_set_fd_handler(fd, NULL, NULL, NULL);
+    s->simulate_one_port_reconnect_fd = -1;
+
+    int err = 0;
+    socklen_t len = sizeof(err);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+    if (err != 0) {
+        printf("[OnePort] Connect failed: %s\n", strerror(err));
+        simulate_one_port_reconnect_fail(s, fd);
+        return;
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    phison_set_socket_keepalive(fd);
+    s->simulate_one_port_socket = fd;
+
+    /* ← 補上：重新掛 disconnect handler，否則下一次斷線偵測不到 */
+    qemu_set_fd_handler(fd, simulate_one_port_disconnect_handler, NULL, s);
+
+    s->simulate_one_port_conn_state = PHISON_CONN_CONNECTED;
+    printf("[OnePort] Connected (fd=%d)\n", fd);
+}
+
+
+
+static void simulate_one_port_reconnect_start(SCSIDiskState *s)
+{
+    if (s->simulate_one_port_conn_state == PHISON_CONN_RECONNECTING) return;
+
+    s->simulate_one_port_conn_state = PHISON_CONN_RECONNECTING;
+    printf("[OnePort] Starting reconnect...\n");
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        simulate_one_port_reconnect_fail(s, -1);
+        return;
+    }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(s->simulate_one_port_port);
+    if (inet_pton(AF_INET, s->simulate_one_port_ip, &addr.sin_addr) <= 0) {
+        simulate_one_port_reconnect_fail(s, fd);
+        return;
+    }
+
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+    connect(fd, (struct sockaddr *)&addr, sizeof(addr)); /* EINPROGRESS is OK */
+
+    s->simulate_one_port_reconnect_fd = fd;
+    qemu_set_fd_handler(fd, NULL, simulate_one_port_on_connected, s);
+}
+
+static void simulate_one_port_reconnect_timer_cb(void *opaque)
+{
+    simulate_one_port_reconnect_start((SCSIDiskState *)opaque);
+}
 
 typedef struct QEMU_PACKED PhisonTesterOpInfo
 {
@@ -2845,6 +3010,8 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
     printf("[Tester] going into socket creation block\n");
     fflush(stdout);
     if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)){
+        printf("[SCSI] going into one-port socket creation block\n");
+        fflush(stdout);
         struct sockaddr_in server_addr = {0};
         s->simulate_one_port_socket = socket(AF_INET, SOCK_STREAM, 0);
         //printf("client sock created\n");
@@ -2856,7 +3023,7 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
 
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(s->simulate_one_port_port);
-        
+
         if (inet_pton(AF_INET, s->simulate_one_port_ip, &server_addr.sin_addr) <= 0) {
             error_setg(errp, "nvme phison model socket inet pton fail.");
             return;
@@ -2868,7 +3035,22 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
             error_setg(errp, "nvme phison model socket connect fail.");
             return;
         }
+        phison_set_socket_keepalive(s->simulate_one_port_socket);
+        if (PHISON_MODEL_TESTER_RECONNECT_ENABLED(s))
+        {
+            printf("Tester Reconnect Enabled!\n");
+            qemu_set_fd_handler(s->simulate_one_port_socket, simulate_one_port_disconnect_handler, NULL, s);
+        }
+        else 
+        {
+            printf("Tester Reconnect Disabled!\n");
+        }
     }
+
+    s->simulate_one_port_reconnect_fd    = -1;
+    s->simulate_one_port_conn_state      = PHISON_CONN_CONNECTED;
+    s->simulate_one_port_reconnect_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                            simulate_one_port_reconnect_timer_cb, s);
 
 
     scsi_realize(&s->qdev, errp);
@@ -3584,6 +3766,7 @@ static Property scsi_hd_properties[] = {
     DEFINE_BLOCK_CHS_PROPERTIES(SCSIDiskState, qdev.conf),
     DEFINE_PROP_STRING("simulate_one_port_ip", SCSIDiskState, simulate_one_port_ip),
     DEFINE_PROP_UINT16("simulate_one_port_port", SCSIDiskState, simulate_one_port_port, 0),
+    DEFINE_PROP_BOOL("reconnect", SCSIDiskState, reconnect, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
