@@ -3380,51 +3380,48 @@ static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
     {
         const char *ip_source = NULL;
 
-        /* 情況 1：優先使用自身的 simulate_model_tester_ip */
+        /* 情況 1：優先使用新參數 simulate_model_tester_ip */
         if (s->simulate_model_tester_ip && s->simulate_model_tester_ip[0] != '\0')
         {
             ip_source = "simulate_model_tester_ip";
         }
-        /* 情況 2：從 phison_source 獲取 phison_model_ip */
+        /* 情況 2：從 phison_source (nvme device) 取得 phison_model_ip */
         else if (s->phison_source)
         {
-            s->simulate_model_tester_ip = object_property_get_str(OBJECT(s->phison_source), "phison_model_ip", NULL);
-            if (s->simulate_model_tester_ip && s->simulate_model_tester_ip[0] != '\0')
+            char *ip = object_property_get_str(OBJECT(s->phison_source),
+                                            "phison_model_ip", NULL);
+            if (ip && ip[0] != '\0')
             {
+                g_free(s->simulate_model_tester_ip); /* 可能是空字串，避免 leak */
+                s->simulate_model_tester_ip = ip;
                 ip_source = "phison_source";
             }
             else
             {
-                /* 沒拿到或拿到空字串，清掉避免 Memory Leak */
-                g_free(s->simulate_model_tester_ip);
-                s->simulate_model_tester_ip = NULL;
+                g_free(ip);
             }
         }
 
-        /* 情況 3：若前兩者都沒拿到，退回使用 simulate_model_tester_ip */
-        if (!s->simulate_model_tester_ip && s->simulate_model_tester_ip && s->simulate_model_tester_ip[0] != '\0')
+        /* 情況 3：向下相容，退回舊參數 simulate_one_port_ip */
+        if (!ip_source && s->simulate_one_port_ip && s->simulate_one_port_ip[0] != '\0')
         {
-            s->simulate_model_tester_ip = g_strdup(s->simulate_model_tester_ip);
-            ip_source = "simulate_model_tester_ip";
+            g_free(s->simulate_model_tester_ip);
+            s->simulate_model_tester_ip = g_strdup(s->simulate_one_port_ip);
+            ip_source = "simulate_one_port_ip";
         }
 
-        /* 若三個來源都沒有取得有效的 IP，則直接報錯或返回 */
-        if (!s->simulate_model_tester_ip || s->simulate_model_tester_ip[0] == '\0')
+        /* 三個來源都沒有有效 IP */
+        if (!ip_source)
         {
             error_setg(errp, "[Phison] Tester port set, but no valid model IP configured.");
             return;
         }
 
-        printf(
-            "[Phison] Using model IP (%s): %s\n",
-            ip_source,
-            s->simulate_model_tester_ip
-        );
+        printf("[Phison] Using model IP (%s): %s\n",
+            ip_source, s->simulate_model_tester_ip);
     }
 
-    printf("[Tester] going into socket creation block\n");
-    fflush(stdout);
-    if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)){
+        if (PHISON_MODEL_ONE_PORT_MODE_ENABLED(s)){
         printf("[One Port Tester] going into one-port socket creation block\n");
         fflush(stdout);
         struct sockaddr_in server_addr = {0};
@@ -4258,7 +4255,7 @@ static Property scsi_hd_properties[] = {
                     quirks, SCSI_DISK_QUIRK_MODE_PAGE_VENDOR_SPECIFIC_APPLE,
                     0),
     DEFINE_BLOCK_CHS_PROPERTIES(SCSIDiskState, qdev.conf),
-    DEFINE_PROP_STRING("simulate_one_port_ip", SCSIDiskState, simulate_model_tester_ip),
+    DEFINE_PROP_STRING("simulate_one_port_ip", SCSIDiskState, simulate_one_port_ip),
     DEFINE_PROP_UINT16("simulate_one_port_port", SCSIDiskState, simulate_one_port_port, 0),
     DEFINE_PROP_STRING("simulate_model_tester_ip", SCSIDiskState, simulate_model_tester_ip),
     DEFINE_PROP_BOOL("reconnect", SCSIDiskState, reconnect, false),
