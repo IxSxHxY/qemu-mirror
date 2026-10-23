@@ -98,12 +98,16 @@ static bool gen_rp_test_migrate_msix(void *opaque, int version_id)
 #include "hw/pci/pci.h"
 #include "hw/pci/pcie.h"
 
+
 #define PHISON_CAP_ID_HEADER    0u
 #define PHISON_CAP_ID_EXT_FLAG  0x10000u
 
 #define PHISON_PCIE_CAP_SIZE    0x3C
 #define PHISON_AER_SIZE         0x48
 #define PHISON_ACS_SIZE         8
+
+// taken from hw/pci/pci-bridge.c
+#define PCI_SSVID_SIZEOF        8
 
 // 支援 Timeout 的 phison_model_socket_use
 // 成功回傳 0，一般錯誤回傳 -1，超時回傳 -2
@@ -343,6 +347,7 @@ static const char *phison_cap_name(uint32_t cap_id)
     case PHISON_CAP_ID_HEADER: return "TYPE1_HEADER";
     case PCI_CAP_ID_EXP:       return "PCIE";
     case PCI_CAP_ID_MSIX:      return "MSIX";
+    case PCI_CAP_ID_SSVID:     return "SSVID";
     default:                   return "UNKNOWN";
     }
 }
@@ -379,6 +384,13 @@ static bool phison_locate_cap(PCIDevice *d, uint32_t addr, int len,
         ranges_overlap(addr, len, d->msix_cap, PCI_CAP_MSIX_SIZEOF)) {
         *cap_id  = PCI_CAP_ID_MSIX;
         *rel_off = addr - d->msix_cap;
+        return true;
+    }
+    PCIERootPortClass *rpc = PCIE_ROOT_PORT_GET_CLASS(d);
+    if (rpc->ssvid_offset &&
+        ranges_overlap(addr, len, rpc->ssvid_offset, PCI_SSVID_SIZEOF)) {   /* 8 */
+        *cap_id  = PCI_CAP_ID_SSVID;
+        *rel_off = addr - rpc->ssvid_offset;
         return true;
     }
     return false;
