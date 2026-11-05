@@ -1553,7 +1553,7 @@ static void nvme_post_cqes(void *opaque)
         req->cqe.sq_id = cpu_to_le16(sq->sqid);
         req->cqe.sq_head = cpu_to_le16(sq->head);
         addr = cq->dma_addr + (cq->tail << NVME_CQES);
-        printf("Should write at addr=0x%lX\n", addr);
+        // printf("Should write at addr=0x%lX\n", addr);
         // if (true)//)sq->sqid == 0 && req->cmd.opcode == 0x06 && (req->cmd.cdw10 & 0x1) == 1)
         // {
         //     printf("Hi\n");
@@ -7541,7 +7541,7 @@ static void nvme_process_sq(void *opaque)
 
         status = sq->sqid ? nvme_io_cmd(n, req) :
             nvme_admin_cmd(n, req);
-        printf("Status = %d\n", status);
+        // printf("Status = %d\n", status);
         // if (status == NVME_NO_COMPLETE && sq->sqid != 0) 
         // {
         //     req->status = status;
@@ -8309,8 +8309,11 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
         (NVME_PMRCAP_PMRWBM(ldl_le_p(&n->bar.pmrcap)) & 0x02)) {
         memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
     }
-
-    return ldn_le_p(ptr + addr, size);
+    // return ldn_le_p(ptr + addr, size);
+    uint64_t res = ldn_le_p(ptr + addr, size);
+    printf("[nvme_mmio_read] Read | Addr:0x%08lX | Sz:%d | Local:0x%08lX\n",
+           addr, size, res);
+    return res;
 }
 
 
@@ -8478,7 +8481,7 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
         nvme_write_bar(n, addr, data, size);
     } else {
         if (PHISON_MODEL_NVME_MODE_ENABLED(n)) return;
-        printf("NVMe process db\n");
+        // printf("NVMe process db\n");
         nvme_process_db(n, addr, data);
     }
 }
@@ -8806,11 +8809,31 @@ static void phison_rpc_read_handler(void *opaque)
         send_data.data = 0;
         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
     }
+    else if (receive.result == PHISON_MODEL_MMIO_RESULT_ASSERT_INTX)
+    {
+        int intx = receive.data;
+        printf("Assert INTx %d...\n", intx);
+        rpc_pci_irq_handler(pci, intx - 1, 1);
+        is_send = true;
+        send_data.result = 1;
+        send_data.data = 0;
+        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
+    }
+    else if (receive.result == PHISON_MODEL_MMIO_RESULT_DEASSERT_INTX)
+    {
+        int intx = receive.data;
+        printf("Deassert INTx %d...\n", intx);
+        rpc_pci_irq_handler(pci, intx - 1, 0);
+        is_send = true;
+        send_data.result = 1;
+        send_data.data = 0;
+        phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
+    }
     else
     {
         printf("Unknown RPC call = %ld!!\n", receive.result);
         is_send = true;
-        send_data.result = 1;
+        send_data.result = 0;
         send_data.data = 0;
         phison_model_socket_use((int)n->phison_model_rpc_client_socket, (void*) &send_data, sizeof(PhisonMMIoOpResult), is_send);
     }
@@ -10297,7 +10320,12 @@ static uint32_t nvme_pci_read_config(PCIDevice *dev, uint32_t address, int len)
             return val;
         }
     }
-    return pci_default_read_config(dev, address, len);
+    // return pci_default_read_config(dev, address, len);
+
+    uint32_t a = pci_default_read_config(dev, address, len);
+        printf("[nvme_pci_read_config] Read | Addr:0x%08X | Sz:%d | Local:0x%08X\n",
+           address, len, a);
+    return a;
 }
 
 // ============================================================
@@ -10398,6 +10426,8 @@ static const VMStateDescription nvme_vmstate = {
     .name = "nvme",
     .unmigratable = 1,
 };
+
+
 
 static void nvme_class_init(ObjectClass *oc, void *data)
 {

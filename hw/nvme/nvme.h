@@ -33,6 +33,8 @@
 #define PHISON_MODEL_MMIO_RESULT_MARK_VEC_USE (3) // RPC from create IOCQ
 #define PHISON_MODEL_MMIO_RESULT_MARK_VEC_UNUSE (4) // RPC from delete IOCQ
 #define PHISON_MODEL_MMIO_RESULT_SET_BRIDGE_DLLLA (5) // RPC to set Bridge DLLLA
+#define PHISON_MODEL_MMIO_RESULT_ASSERT_INTX (6) // RPC to assert INTX
+#define PHISON_MODEL_MMIO_RESULT_DEASSERT_INTX (7) // RPC to deassert INTX
 
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
@@ -573,6 +575,7 @@ typedef struct NvmeParams {
     uint16_t phison_model_rpc_port;
     bool reconnect;
     bool     msix_exclusive_bar;
+    bool use_intx;
 
     struct {
         bool mem;

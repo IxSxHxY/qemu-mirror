@@ -337,6 +337,60 @@ static void pci_change_irq_level(PCIDevice *pci_dev, int irq_num, int change)
     pci_bus_change_irq_level(bus, irq_num, change);
 }
 
+static void pci_change_irq_level_debug(PCIDevice *pci_dev, int irq_num, int change)
+{
+    PCIBus *bus;
+    int original_irq = irq_num;
+    int step = 0;
+
+    printf("\n[IRQ_DEBUG][START] Dev: %s | Initial Pin: %d (INT%c) | Change: %d (%s)\n",
+           DEVICE(pci_dev)->canonical_path,
+           original_irq,
+           'A' + original_irq,
+           change,
+           change > 0 ? "ASSERT" : (change < 0 ? "DEASSERT" : "NO_CHANGE"));
+
+    for (;;) {
+        int dev_irq = irq_num;
+        bus = pci_get_bus(pci_dev);
+
+        if (!bus->map_irq) {
+            printf("[IRQ_DEBUG][ERROR] Bus '%s' does NOT have map_irq callback!\n",
+                   pci_bus_is_root(bus) ? "root-bus" : DEVICE(bus->parent_dev)->canonical_path);
+            assert(bus->map_irq);
+        }
+
+        irq_num = bus->map_irq(pci_dev, irq_num);
+
+        printf("[IRQ_DEBUG][STEP %d] Path: %s -> Bus: %s | Swizzled IRQ: %d -> %d\n",
+               step++,
+               DEVICE(pci_dev)->canonical_path,
+               pci_bus_is_root(bus) ? "root-complex" : DEVICE(bus->parent_dev)->canonical_path,
+               dev_irq,
+               irq_num);
+
+        trace_pci_route_irq(dev_irq, DEVICE(pci_dev)->canonical_path, irq_num,
+                            pci_bus_is_root(bus) ? "root-complex"
+                                    : DEVICE(bus->parent_dev)->canonical_path);
+
+        if (bus->set_irq) {
+            printf("[IRQ_DEBUG][ROUTED] Reached Root Complex! Final GSI/IRQ Pin = %d\n", irq_num);
+            break;
+        }
+
+        pci_dev = bus->parent_dev;
+        if (!pci_dev) {
+            printf("[IRQ_DEBUG][ERROR] Parent PCI device is NULL before reaching Root Complex!\n");
+            break;
+        }
+    }
+
+    printf("[IRQ_DEBUG][EXEC] Calling pci_bus_change_irq_level(bus, irq_num=%d, change=%d)...\n\n",
+           irq_num, change);
+
+    pci_bus_change_irq_level(bus, irq_num, change);
+}
+
 int pci_bus_get_irq_level(PCIBus *bus, int irq_num)
 {
     assert(irq_num >= 0);
@@ -1662,6 +1716,17 @@ static void pci_irq_handler(void *opaque, int irq_num, int level)
     if (pci_irq_disabled(pci_dev))
         return;
     pci_change_irq_level(pci_dev, irq_num, change);
+}
+
+/* 0 <= irq_num <= 3. level must be 0 or 1 */
+void rpc_pci_irq_handler(void *opaque, int irq_num, int level)
+{
+    PCIDevice *pci_dev = opaque;
+
+    assert(0 <= irq_num && irq_num < PCI_NUM_PINS);
+    assert(level == 0 || level == 1);
+    int change = level ? 1 : -1;
+    pci_change_irq_level_debug(pci_dev, irq_num, change);
 }
 
 qemu_irq pci_allocate_irq(PCIDevice *pci_dev)
