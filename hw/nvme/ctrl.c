@@ -8246,14 +8246,15 @@ static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is
                 return -1; // 斷線回傳 -1
             } 
             
-            // 檢查是否是因為超時引發的錯誤
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                printf("[Socket %d] Recv TIMEOUT triggered (%ld 秒)\n", sock_fd, timeout.tv_sec);
-                return -2; // 超時回傳 -2
+            // 檢查是否是因為超時引發的錯誤或訊號打斷
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                printf("[Socket %d] Recv interrupted or timed out! errno: %d (%s), timeout setting: %ld s, received: %ld/%ld bytes\n", 
+                       sock_fd, errno, strerror(errno), timeout.tv_sec, received, size);
+                return -2; // 超時/打斷回傳 -2
             }
 
-            printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes (errno: %d)\n", 
-                    sock_fd, received, size, errno);
+            printf("[Socket %d] Recv failed or incomplete: %ld/%ld bytes (errno: %d, %s)\n", 
+                    sock_fd, received, size, errno, strerror(errno));
             return -1;
         }
 
