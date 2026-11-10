@@ -8727,6 +8727,7 @@ static void phison_rpc_read_handler(void *opaque)
     PhisonMMIoOpResult send_data = {0};
     bool is_send = false;
     int vmid = get_vmid_from_qmp_chardev();
+    int64_t start_us = g_get_monotonic_time();
     int stuck_seconds = 0;
     int ret;
 
@@ -8739,7 +8740,7 @@ static void phison_rpc_read_handler(void *opaque)
                                          qemu_name, 0);
             break;
         } else if (ret == -2) {
-            stuck_seconds++;
+            stuck_seconds = (int)((g_get_monotonic_time() - start_us) / G_USEC_PER_SEC);
             phison_socket_update_status("RPC", vmid, n->params.phison_model_ip,
                                          qemu_name, stuck_seconds);
         } else {
@@ -9156,7 +9157,7 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
         PhisonMMIoOpResult result;
         int stuck_seconds = 0;
-
+        int64_t start_us = g_get_monotonic_time();
         while (true)
         {
             int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
@@ -9167,7 +9168,8 @@ static uint64_t nvme_mmio_read_phison_model(void *opaque, hwaddr addr, unsigned 
                                              qemu_name, 0);
                 break;
             } else if (ret == -2) {
-                stuck_seconds++;
+                // stuck_seconds++;
+                stuck_seconds = (int)((g_get_monotonic_time() - start_us) / G_USEC_PER_SEC);
                 phison_socket_update_status("NVME Register", vmid, n->params.phison_model_ip,
                                              qemu_name, stuck_seconds);
             } else {        
@@ -10366,7 +10368,7 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
     if (phison_model_socket_use(sock_fd, &info, sizeof(info), true) == 0) {
         PhisonMMIoOpResult result;
         int stuck_seconds = 0;
-
+        int64_t start_us = g_get_monotonic_time();
         while (true)
         {
             int ret = phison_model_socket_use(sock_fd, &result, sizeof(result), false);
@@ -10377,7 +10379,8 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
                                              qemu_name, 0);
                 break;
             } else if (ret == -2) {
-                stuck_seconds++;
+                // stuck_seconds++;
+                stuck_seconds = (int)((g_get_monotonic_time() - start_us) / G_USEC_PER_SEC);
                 phison_socket_update_status("PCI Config Space", vmid, n->params.phison_model_ip,
                                              qemu_name, stuck_seconds);
             } else {

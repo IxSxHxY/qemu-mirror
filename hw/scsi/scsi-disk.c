@@ -739,6 +739,7 @@ static int send_cdb_to_i3c_phison_model_tester(
     int send_ret, recv_ret;
     int sock_fd = s->phison_model_tester_socket; // 注意：I3C 使用 i3c_port_socket
     int vmid = get_vmid_from_qmp_chardev();
+    int64_t start_us = g_get_monotonic_time();   /* 開始等待的時間點 (微秒, monotonic) */
     int stuck_seconds = 0;
 
     memcpy(info.cdb, cdb, sizeof(info.cdb));
@@ -766,7 +767,7 @@ static int send_cdb_to_i3c_phison_model_tester(
             break;
         } else if (recv_ret == -2) {
             /* 接收超時：累加卡住秒數並更新 status 檔案 */
-            stuck_seconds++;
+            stuck_seconds = (int)((g_get_monotonic_time() - start_us) / G_USEC_PER_SEC);
             phison_socket_update_status("I3C", vmid, s->phison_model_tester_ip, qemu_name, stuck_seconds);
         } else {
             /* 其他錯誤 (例如連線中斷) */
