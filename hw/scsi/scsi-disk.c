@@ -445,27 +445,27 @@ static bool i3c_map_shared_memory(SCSIDiskState *s, Error **errp)
 // ============================================================
 static void phison_set_socket_keepalive(int fd)
 {
-    int enable = 1;
-    int idle   = 5;   // start probing after 3s of no traffic
-    int intvl  = 1;   // 1s between each probe
-    int cnt    = 3;   // 3 consecutive unanswered probes = dead
+    // int enable = 1;
+    // int idle   = 5;   // start probing after 2s of no traffic
+    // int intvl  = 1;   // 2s between each probe
+    // int cnt    = 5;   // 2 consecutive unanswered probes = dead
 
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+    // setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
+    // setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+    // setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    // setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
 
-    // Hard ceiling on "time since the last ACK we received", in ms.
-    // This covers BOTH real outbound data waiting on a retransmit
-    // AND the keepalive probes above waiting on a response — if
-    // either goes unacknowledged past this timeout, the connection
-    // is force-failed immediately instead of waiting out TCP's
-    // much longer default retransmission backoff (which can run
-    // into minutes). Effectively acts as an upper bound for the
-    // keepalive sequence too, since it doesn't care whether the
-    // unacked packet was a probe or actual data.
-    unsigned int user_timeout_ms = 15000;
-    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
+    // // Hard ceiling on "time since the last ACK we received", in ms.
+    // // This covers BOTH real outbound data waiting on a retransmit
+    // // AND the keepalive probes above waiting on a response — if
+    // // either goes unacknowledged past this timeout, the connection
+    // // is force-failed immediately instead of waiting out TCP's
+    // // much longer default retransmission backoff (which can run
+    // // into minutes). Effectively acts as an upper bound for the
+    // // keepalive sequence too, since it doesn't care whether the
+    // // unacked packet was a probe or actual data.
+    // unsigned int user_timeout_ms = 25000;
+    // setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
 }
 // ============================================================
 // One-port reconnect state machine
