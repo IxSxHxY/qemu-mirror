@@ -10389,6 +10389,7 @@ static uint32_t nvme_pci_read_config_phison_model(PCIDevice *dev, uint32_t addre
                 {
                     phison_on_disconnect(n);
                 }
+                break;
             }
         }
     }
