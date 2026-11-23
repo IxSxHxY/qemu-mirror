@@ -467,7 +467,6 @@ static void phison_set_socket_keepalive(int fd)
     unsigned int user_timeout_ms = 25000;
     setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
 }
-
 // ============================================================
 // One-port reconnect state machine
 // ============================================================
