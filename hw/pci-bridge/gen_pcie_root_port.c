@@ -176,9 +176,9 @@ static int phison_model_socket_use(int sock_fd, void *data, size_t size, bool is
 static void phison_set_socket_keepalive(int fd)
 {
     int enable = 1;
-    int idle   = 2;   // start probing after 2s of no traffic
-    int intvl  = 2;   // 2s between each probe
-    int cnt    = 2;   // 2 consecutive unanswered probes = dead
+    int idle   = 5;   // start probing after 3s of no traffic
+    int intvl  = 1;   // 1s between each probe
+    int cnt    = 5;   // 3 consecutive unanswered probes = dead
 
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
@@ -194,7 +194,7 @@ static void phison_set_socket_keepalive(int fd)
     // into minutes). Effectively acts as an upper bound for the
     // keepalive sequence too, since it doesn't care whether the
     // unacked packet was a probe or actual data.
-    unsigned int user_timeout_ms = 6000;
+    unsigned int user_timeout_ms = 25000;
     setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof(user_timeout_ms));
 }
 
